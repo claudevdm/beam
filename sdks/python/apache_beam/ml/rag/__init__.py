@@ -8,6 +8,3 @@ This package provides components for building RAG pipelines in Apache Beam, incl
 
 For more information, see the design doc at sdks/python/apache_beam/ml/rag/design.md
 """
-
-# Version of the apache-beam-ml-rag package
-__version__ = '0.1.0'

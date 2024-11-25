@@ -9,19 +9,26 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 
 @dataclass
+class ChunkContent:
+    """Container for content to be embedded.
+    """
+    text: Optional[str] = None
+    image_data: Optional[bytes] = None
+
+@dataclass
 class Chunk:
     """Represents a chunk of text with metadata.
     
     Attributes:
+        text: The actual content of the chunk
         id: Unique identifier for the chunk
         index: Index of this chunk within the original document
-        text: The actual text content of the chunk
         metadata: Additional metadata about the chunk (e.g., source document, summary)
     """
-    id: str
-    index: int
-    text: str
-    metadata: Dict[str, Any]
+    content: ChunkContent
+    id: Optional[str] = None
+    index: Optional[int] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 @dataclass
 class Embedding:
