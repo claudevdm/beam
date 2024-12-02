@@ -133,7 +133,7 @@ class SentenceTransformerEmbeddings(EmbeddingsManager):
       max_batch_size: The maximum batch size to be used for inference.
       large_model: Whether to share the model across processes.
     """
-    super().__init__(columns, **kwargs)
+    super().__init__(columns=columns, **kwargs)
     self.model_name = model_name
     self.max_seq_length = max_seq_length
     self.image_model = image_model

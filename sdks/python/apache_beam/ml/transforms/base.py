@@ -24,12 +24,17 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
 from typing import Generic
+from typing import List
 from typing import Optional
 from typing import TypeVar
 from typing import Union
 
+import functools
 import jsonpickle
 import numpy as np
+
+from dataclasses import dataclass
+from collections.abc import Callable
 
 import apache_beam as beam
 from apache_beam.io.filesystems import FileSystems
@@ -181,25 +186,97 @@ class ProcessHandler(
     Append transforms to the ProcessHandler.
     """
 
+InputT = TypeVar('InputT')  # e.g., Chunk
+OutputT = TypeVar('OutputT')  # e.g., Embedding
+
+@dataclass
+class EmbeddingTypeAdapter:
+    """Adapts input types to text for embedding and converts output embeddings.
+    
+    Args:
+        input_fn: Function to extract text for embedding from input type
+        output_fn: Function to create output type from input and embeddings
+    """
+    input_fn: Callable[[List[InputT]], List[str]]
+    output_fn: Callable[[List[InputT], List[Any]], List[OutputT]]
+
+def dict_input_fn(columns: List[str], batch: List[dict]) -> List[str]:
+    """Extract text from specified columns in batch."""
+    if not batch or not isinstance(batch[0], dict):
+      raise TypeError(
+          'Expected data to be dicts, got '
+          f'{type(batch[0])} instead.')
+
+    result = []
+    expected_keys = set(batch[0].keys())
+    expected_columns = set(columns)
+    # Process one batch item at a time
+    for item in batch:
+        item_keys = item.keys()
+        if set(item_keys) != expected_keys:
+            extra_keys = item_keys - expected_keys
+            missing_keys = expected_keys - item_keys
+            raise RuntimeError(
+                f'All dicts in batch must have the same keys. '
+                f'extra keys: {extra_keys}, '
+                f'missing keys: {missing_keys}'
+            )
+        missing_columns = expected_columns - item_keys 
+        if (missing_columns):
+          raise RuntimeError(
+          f'Data does not contain the following columns '
+          f': {missing_columns}.')
+
+        # Get all columns for this item
+        for col in columns:
+            result.append(item[col])
+    return result
+
+def dict_output_fn(columns: List[str], batch: List[dict], embeddings: List[Any]) -> List[dict]:
+    """Map embeddings back to columns in batch."""
+    result = []
+    for batch_idx, item in enumerate(batch):
+        for col_idx, col in enumerate(columns):
+            embedding_idx = batch_idx * len(columns) + col_idx
+            item[col] = embeddings[embedding_idx]
+        result.append(item)
+    return result
+
+def create_dict_adapter(columns: List[str]) -> EmbeddingTypeAdapter:
+    """Create adapter for dict-based processing."""
+    return EmbeddingTypeAdapter(
+        input_fn=functools.partial(dict_input_fn, columns),
+        output_fn=functools.partial(dict_output_fn, columns)
+    )
+
 
 # TODO:https://github.com/apache/beam/issues/29356
 #  Add support for inference_fn
 class EmbeddingsManager(MLTransformProvider):
   def __init__(
       self,
-      columns: list[str],
       *,
+      columns: list[str] = None,
+      type_adapter: Optional[EmbeddingTypeAdapter] = None,
       # common args for all ModelHandlers.
       load_model_args: Optional[dict[str, Any]] = None,
       min_batch_size: Optional[int] = None,
       max_batch_size: Optional[int] = None,
       large_model: bool = False,
       **kwargs):
+    if columns is not None and type_adapter is not None:
+        raise ValueError(
+            "Cannot specify both 'columns' and 'type_adapter'. "
+            "Use either columns for dict processing or type_adapter "
+            "for custom types."
+        )
     self.load_model_args = load_model_args or {}
     self.min_batch_size = min_batch_size
     self.max_batch_size = max_batch_size
     self.large_model = large_model
     self.columns = columns
+    if columns is not None:
+      self.type_adapter = create_dict_adapter(columns)
     self.inference_args = kwargs.pop('inference_args', {})
 
     if kwargs:
@@ -621,32 +698,19 @@ class _EmbeddingHandler(ModelHandler):
       raise TypeError(
           'Expected data to be dicts, got '
           f'{type(batch[0])} instead.')
-
+    
   def _process_batch(
       self,
-      dict_batch: dict[str, list[Any]],
+      batch: List[InputT],
       model: ModelT,
-      inference_args: Optional[dict[str, Any]]) -> dict[str, list[Any]]:
-    result: dict[str, list[Any]] = collections.defaultdict(list)
-    input_keys = dict_batch.keys()
-    missing_columns_in_data = set(self.columns) - set(input_keys)
-    if missing_columns_in_data:
-      raise RuntimeError(
-          f'Data does not contain the following columns '
-          f': {missing_columns_in_data}.')
-    for key, batch in dict_batch.items():
-      if key in self.columns:
-        self._validate_column_data(batch)
-        prediction = self._underlying.run_inference(
-            batch, model, inference_args)
-        if isinstance(prediction, np.ndarray):
-          prediction = prediction.tolist()
-          result[key] = prediction  # type: ignore[assignment]
-        else:
-          result[key] = prediction  # type: ignore[assignment]
-      else:
-        result[key] = batch
-    return result
+      inference_args: Optional[dict[str, Any]]
+  ):
+    embedding_input = self.embedding_config.type_adapter.input_fn(batch)
+    prediction = self._underlying.run_inference(embedding_input, model, inference_args)
+    return self.embedding_config.type_adapter.output_fn(
+      batch,
+      prediction.tolist() if isinstance(prediction, np.ndarray) else prediction
+    )
 
   def run_inference(
       self,
@@ -659,11 +723,11 @@ class _EmbeddingHandler(ModelHandler):
     a list of dicts. Each dict should have the same keys, and the shape
     should be of the same size for a single key across the batch.
     """
-    self._validate_batch(batch)
-    dict_batch = _convert_list_of_dicts_to_dict_of_lists(list_of_dicts=batch)
-    transformed_batch = self._process_batch(dict_batch, model, inference_args)
-    return _convert_dict_of_lists_to_lists_of_dict(
-        dict_of_lists=transformed_batch,
+    embedding_input = self.embedding_config.type_adapter.input_fn(batch)
+    prediction = self._underlying.run_inference(embedding_input, model, inference_args)
+    return self.embedding_config.type_adapter.output_fn(
+      batch,
+      prediction.tolist() if isinstance(prediction, np.ndarray) else prediction
     )
 
   def get_metrics_namespace(self) -> str:

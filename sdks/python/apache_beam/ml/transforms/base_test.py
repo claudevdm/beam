@@ -21,7 +21,7 @@ import secrets
 import shutil
 import tempfile
 import time
-import typing
+import collections
 import unittest
 from collections.abc import Sequence
 from typing import Any
@@ -140,8 +140,8 @@ class BaseMLTransformTest(unittest.TestCase):
               'x': int, 'y': float
           },
           expected_dtype={
-              'x': typing.Sequence[np.float32],
-              'y': typing.Sequence[np.float32],
+              'x': collections.abc.Sequence[np.float32],
+              'y': collections.abc.Sequence[np.float32],
           },
       ),
       param(
@@ -153,8 +153,8 @@ class BaseMLTransformTest(unittest.TestCase):
               'x': np.int32, 'y': np.float32
           },
           expected_dtype={
-              'x': typing.Sequence[np.float32],
-              'y': typing.Sequence[np.float32],
+              'x': Sequence[np.float32],
+              'y': Sequence[np.float32],
           },
       ),
       param(
@@ -165,8 +165,8 @@ class BaseMLTransformTest(unittest.TestCase):
               'x': list[int], 'y': list[float]
           },
           expected_dtype={
-              'x': typing.Sequence[np.float32],
-              'y': typing.Sequence[np.float32],
+              'x': Sequence[np.float32],
+              'y': Sequence[np.float32],
           },
       ),
       param(
@@ -174,12 +174,12 @@ class BaseMLTransformTest(unittest.TestCase):
               'x': [1, 2, 3], 'y': [2.0, 3.0, 4.0]
           }],
           input_types={
-              'x': typing.Sequence[int],
-              'y': typing.Sequence[float],
+              'x': Sequence[int],
+              'y': Sequence[float],
           },
           expected_dtype={
-              'x': typing.Sequence[np.float32],
-              'y': typing.Sequence[np.float32],
+              'x': Sequence[np.float32],
+              'y': Sequence[np.float32],
           },
       ),
   ])
@@ -431,9 +431,9 @@ class TextEmbeddingHandlerTest(unittest.TestCase):
             'x': "Apache Beam", 'y': "Hello world", 'z': 'unchanged'
         },
     ]
-    self.embedding_conig.columns = ['x', 'y']
+    embedding_config = FakeEmbeddingsManager(columns=['x', 'y'])
     expected_data = [{
-        key: (value[::-1] if key in self.embedding_conig.columns else value)
+        key: (value[::-1] if key in embedding_config.columns else value)
         for key,
         value in d.items()
     } for d in data]
@@ -443,7 +443,7 @@ class TextEmbeddingHandlerTest(unittest.TestCase):
           | beam.Create(data)
           | base.MLTransform(
               write_artifact_location=self.artifact_location).with_transform(
-                  self.embedding_conig))
+                  embedding_config))
       assert_that(
           result,
           equal_to(expected_data),
@@ -458,7 +458,7 @@ class TextEmbeddingHandlerTest(unittest.TestCase):
             'x': "Apache Beam", 'y': "Hello world"
         },
     ]
-    self.embedding_conig.columns = ['x', 'y', 'a']
+    embedding_config = FakeEmbeddingsManager(columns=['x', 'y', 'a'])
 
     with self.assertRaises(RuntimeError):
       with beam.Pipeline() as p:
@@ -467,7 +467,7 @@ class TextEmbeddingHandlerTest(unittest.TestCase):
             | beam.Create(data)
             | base.MLTransform(
                 write_artifact_location=self.artifact_location).with_transform(
-                    self.embedding_conig))
+                    embedding_config))
 
   def test_handler_with_list_data(self):
     data = [{
