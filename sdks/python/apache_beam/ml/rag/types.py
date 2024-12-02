@@ -5,7 +5,7 @@ implementation, including Chunk and Embedding types that define the data
 contracts between different stages of the pipeline.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 
 @dataclass
@@ -41,6 +41,7 @@ class Embedding:
         metadata: Additional metadata about the embedding
     """
     id: str
-    dense_embedding: Optional[List[float]]
-    sparse_embedding: Optional[Tuple[List[int], List[float]]]  # For hybrid search
-    metadata: Dict[str, Any]
+    dense_embedding: Optional[List[float]] = None
+    sparse_embedding: Optional[Tuple[List[int], List[float]]] = None  # For hybrid search
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    content: Optional[ChunkContent] = None
