@@ -136,13 +136,15 @@ class Enrichment(beam.PTransform[beam.PCollection[InputT],
       join_fn: JoinFn = cross_join,
       timeout: Optional[float] = DEFAULT_TIMEOUT_SECS,
       repeater: Repeater = ExponentialBackOffRepeater(),
-      throttler: PreCallThrottler = DefaultThrottler()):
+      throttler: PreCallThrottler = DefaultThrottler(),
+      use_custom_types: bool = False):
     self._cache = None
     self._source_handler = source_handler
     self._join_fn = join_fn
     self._timeout = timeout
     self._repeater = repeater
     self._throttler = throttler
+    self._use_custom_types = use_custom_types
 
   def expand(self,
              input_row: beam.PCollection[InputT]) -> beam.PCollection[OutputT]:
@@ -166,7 +168,9 @@ class Enrichment(beam.PTransform[beam.PCollection[InputT],
     return (
         fetched_data
         | "enrichment_join" >>
-        beam.Map(lambda x: self._join_fn(x[0]._asdict(), x[1]._asdict())))
+        beam.Map(
+          lambda x: self._join_fn(x[0]._asdict(), x[1]._asdict()) if not self._use_custom_types else 
+          self._join_fn(x[0], x[1])))
 
   def with_redis_cache(
       self,

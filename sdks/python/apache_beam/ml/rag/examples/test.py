@@ -2,6 +2,8 @@ import apache_beam as beam
 
 import tempfile
 
+from typing import Any, Dict
+
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from apache_beam.ml.transforms.base import MLTransform
 from apache_beam.ml.rag.chunking.langchain import LangChainChunkingProvider
@@ -10,6 +12,9 @@ from apache_beam.ml.rag.storage.base import VectorDatabaseWriteTransform
 from apache_beam.ml.rag.storage.bigquery import BigQueryVectorWriterConfig
 from transformers import AutoTokenizer
 from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.ml.rag.types import Embedding, Chunk, ChunkContent
+from apache_beam.ml.rag.enrichment.bigquery_vector_search import BigQueryVectorSearchEnrichmentHandler, BigQueryVectorSearchParameters
+from apache_beam.transforms.enrichment import Enrichment
 
 
 embedder = HuggingfaceTextEmbeddings(
@@ -22,6 +27,10 @@ splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
     chunk_overlap=52,
 )
 
+def join_fn(left: Embedding, right: Dict[str, Any]) -> Embedding:
+    left.metadata['enrichment_data'] = right
+    return left
+
 
 def run_pipeline():
     with beam.Pipeline(options=PipelineOptions([
@@ -29,6 +38,8 @@ def run_pipeline():
         '--temp_location=gs://cvandermerwe/managed',
         '--expansion_service_port=8888'
         ])) as p:
+
+        # Ingestion
         _ = (p
              | beam.Create([{
                     'content': 'This is a simple test document. It has multiple sentences. '
@@ -62,6 +73,42 @@ def run_pipeline():
                         "write_disposition": "WRITE_TRUNCATE",
                     }
                 ))
+            )
+        
+        # Enrichment
+        _ = (p
+             | beam.Create([
+                 Chunk(
+                     id="simple_query",
+                     content=ChunkContent(text="This is a simple test document."),
+                     metadata={"language": "en"}
+                 ),
+                 Chunk(
+                     id="medical_query",
+                     content=ChunkContent(text="When did the patient arrive?"),
+                     metadata={"language": "en"}
+                ),
+                ]
+             )
+             | MLTransform(write_artifact_location=tempfile.mkdtemp())
+                .with_transform(embedder)
+             | Enrichment(
+                  BigQueryVectorSearchEnrichmentHandler(
+                   project="dataflow-twest",
+                   vector_search_parameters=BigQueryVectorSearchParameters(
+                        table_name='dataflow-twest.claude_test.rag_test',
+                        embedding_column='embedding',
+                        columns=['metadata', 'content'],
+                        neighbor_count=3,
+                        metadata_restriction_template=(
+                            "check_metadata(metadata, 'language','{language}')"
+                        )
+                    )
+                  ),
+                  join_fn=join_fn,
+                  use_custom_types=True
+                )
+              |beam.Map(print)
             )
     
 
