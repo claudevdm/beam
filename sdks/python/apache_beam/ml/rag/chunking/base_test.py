@@ -16,16 +16,16 @@
 
 """Tests for apache_beam.ml.rag.chunking.base."""
 
-import unittest
 import pytest
+import unittest
+from typing import Any, Dict, Optional
 
 import apache_beam as beam
-from apache_beam.testing.test_pipeline import TestPipeline
-from apache_beam.testing.util import assert_that
-from apache_beam.testing.util import equal_to
-from apache_beam.ml.rag.chunking.base import ChunkingTransformProvider, ChunkIdFn
+from apache_beam.ml.rag.chunking.base import (
+    ChunkIdFn, ChunkingTransformProvider)
 from apache_beam.ml.rag.types import Chunk, Content
-from typing import Optional, Dict, Any
+from apache_beam.testing.test_pipeline import TestPipeline
+from apache_beam.testing.util import assert_that, equal_to
 
 
 class WordSplitter(beam.DoFn):

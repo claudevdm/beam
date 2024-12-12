@@ -22,8 +22,9 @@ contracts between different stages of the pipeline.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any
+
 import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass

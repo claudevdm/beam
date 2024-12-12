@@ -15,13 +15,14 @@
 # limitations under the License.
 #
 
-import apache_beam as beam
-from apache_beam.ml.transforms.base import MLTransformProvider
-from apache_beam.ml.rag.types import Chunk
-from typing import Optional, Dict, Any
-from collections.abc import Callable
 import abc
 import functools
+from collections.abc import Callable
+from typing import Any, Dict, Optional
+
+import apache_beam as beam
+from apache_beam.ml.rag.types import Chunk
+from apache_beam.ml.transforms.base import MLTransformProvider
 
 ChunkIdFn = Callable[[Chunk], str]
 

@@ -15,11 +15,13 @@
 # limitations under the License.
 #
 
-import apache_beam as beam
 from langchain.text_splitter import TextSplitter
-from apache_beam.ml.rag.chunking.base import ChunkingTransformProvider, ChunkIdFn
+from typing import Any, Dict, List, Optional
+
+import apache_beam as beam
+from apache_beam.ml.rag.chunking.base import (
+    ChunkIdFn, ChunkingTransformProvider)
 from apache_beam.ml.rag.types import Chunk, Content
-from typing import List, Optional, Dict, Any
 
 
 class LangChainChunkingProvider(ChunkingTransformProvider):

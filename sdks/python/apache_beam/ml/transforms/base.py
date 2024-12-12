@@ -14,36 +14,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import dataclass
+
 import abc
+import functools
+import jsonpickle
 import logging
+import numpy as np
 import os
 import tempfile
 import uuid
-from collections.abc import Callable
-from collections.abc import Mapping
-from collections.abc import Sequence
-from typing import Any
-from typing import cast
-from typing import Dict
-from typing import Generic
-from typing import Iterable
-from typing import List
-from typing import Optional
-from typing import TypeVar
-from typing import Union
-
-import functools
-import jsonpickle
-import numpy as np
-
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from typing import (
+    Any, Dict, Generic, Iterable, List, Optional, TypeVar, Union, cast)
 
 import apache_beam as beam
 from apache_beam.io.filesystems import FileSystems
 from apache_beam.metrics.metric import Metrics
-from apache_beam.ml.inference.base import ModelHandler
-from apache_beam.ml.inference.base import ModelT
-from apache_beam.ml.inference.base import RunInferenceDLQ
+from apache_beam.ml.inference.base import ModelHandler, ModelT, RunInferenceDLQ
 from apache_beam.options.pipeline_options import PipelineOptions
 
 _LOGGER = logging.getLogger(__name__)
@@ -258,11 +246,6 @@ class EmbeddingsManager(MLTransformProvider):
       max_batch_size: Optional[int] = None,
       large_model: bool = False,
       **kwargs):
-    if columns is not None and type_adapter is not None:
-      raise ValueError(
-          "Cannot specify both 'columns' and 'type_adapter'. "
-          "Use either columns for dict processing or type_adapter "
-          "for custom types.")
     self.load_model_args = load_model_args or {}
     self.min_batch_size = min_batch_size
     self.max_batch_size = max_batch_size

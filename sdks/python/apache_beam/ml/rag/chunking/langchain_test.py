@@ -19,18 +19,15 @@
 import unittest
 
 import apache_beam as beam
-
-from apache_beam.testing.test_pipeline import TestPipeline
-from apache_beam.testing.util import assert_that
-from apache_beam.testing.util import equal_to
 from apache_beam.ml.rag.types import Chunk
+from apache_beam.testing.test_pipeline import TestPipeline
+from apache_beam.testing.util import assert_that, equal_to
 
 try:
   from apache_beam.ml.rag.chunking.langchain import LangChainChunkingProvider
+
   from langchain.text_splitter import (
-      RecursiveCharacterTextSplitter,
-      CharacterTextSplitter,
-  )
+      CharacterTextSplitter, RecursiveCharacterTextSplitter)
   LANGCHAIN_AVAILABLE = True
 except ImportError:
   LANGCHAIN_AVAILABLE = False
