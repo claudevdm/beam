@@ -335,8 +335,8 @@ class AlloyDBVectorWriterConfigTest(unittest.TestCase):
 
     connector_options = AlloyDBLanguageConnectorConfig(
         database_name=self.database,
-        instance_name="projects/apache-beam-testing/location/us-central1/\
-        clusters/testing-psc/instances/testing-psc-1",
+        instance_name="projects/apache-beam-testing/locations/us-central1/\
+            clusters/testing-psc/instances/testing-psc-1",
         ip_type="PSC")
     connection_config = AlloyDBConnectionConfig.with_language_connector(
         connector_options=connector_options,
