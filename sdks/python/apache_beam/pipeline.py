@@ -985,7 +985,8 @@ class Pipeline(HasDisplayData):
       context = pipeline_context.PipelineContext(
           use_fake_coders=use_fake_coders,
           component_id_map=self.component_id_map,
-          default_environment=default_environment)
+          default_environment=default_environment,
+          pipeline_options=self._options)
     elif default_environment is not None:
       raise ValueError(
           'Only one of context or default_environment may be specified.')

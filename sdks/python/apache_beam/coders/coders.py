@@ -180,7 +180,8 @@ class Coder(object):
     """
     return False
 
-  def as_deterministic_coder(self, step_label, error_message=None):
+  def as_deterministic_coder(
+      self, step_label, error_message=None, update_compatibility_version=None):
     """Returns a deterministic version of self, if possible.
 
     Otherwise raises a value error.
@@ -883,13 +884,17 @@ class _MemoizingPickleCoder(_PickleCoderBase):
     return Any
 
 
+def _pickle_coder_dumps(x):
+  logging.warning(f"CLAUDE _pickle_coder_dumps {x}")
+  return pickle.dumps(x, pickle.HIGHEST_PROTOCOL)
+
+
 class PickleCoder(_PickleCoderBase):
   """Coder using Python's pickle functionality."""
   def _create_impl(self):
     dumps = pickle.dumps
     protocol = pickle.HIGHEST_PROTOCOL
-    return coder_impl.CallbackCoderImpl(
-        lambda x: dumps(x, protocol), pickle.loads)
+    return coder_impl.CallbackCoderImpl(_pickle_coder_dumps, pickle.loads)
 
   def as_deterministic_coder(self, step_label, error_message=None):
     return FastPrimitivesCoder(self, requires_deterministic=step_label)
@@ -911,16 +916,61 @@ class CloudpickleCoder(_PickleCoderBase):
         cloudpickle_pickler.dumps, cloudpickle_pickler.loads)
 
 
+import logging
+
+
+def is_compat_version_prior_to(
+    update_compatibility_version, breaking_change_version):
+  logging.warning(f"CLAUDE {update_compatibility_version}")
+  # This function is used in a branch statement to determine whether we should
+  # keep the old behavior prior to a breaking change or use the new behavior.
+  # - If update_compatibility_version < breaking_change_version, we will return
+  #   True and keep the old behavior.
+
+  if update_compatibility_version is None:
+    return False
+
+  compat_version = tuple(map(int, update_compatibility_version.split('.')[0:3]))
+  change_version = tuple(map(int, breaking_change_version.split('.')[0:3]))
+  for i in range(min(len(compat_version), len(change_version))):
+    if compat_version[i] < change_version[i]:
+      return True
+  return False
+
+
+def _should_force_use_dill(update_compatibility_version, coder):
+  force_use_dill = is_compat_version_prior_to(
+      update_compatibility_version=update_compatibility_version,
+      breaking_change_version="2.67.0")
+  if not force_use_dill:
+    return force_use_dill
+
+  try:
+    import dill
+    assert dill.__version__ == "0.3.1.1"
+  except Exception as e:
+    raise RuntimeError("Error using dill for encoding special types. Ensure" \
+                       " dill version '0.3.1.1' is installed in execution and" \
+                      f" runtime environment. Error {e}")
+  return force_use_dill
+
+
 class DeterministicFastPrimitivesCoder(FastCoder):
   """Throws runtime errors when encoding non-deterministic values."""
-  def __init__(self, coder, step_label):
+  def __init__(self, coder, step_label, update_compatibility_version=None):
     self._underlying_coder = coder
     self._step_label = step_label
+    self._update_compatibility_version = update_compatibility_version
 
   def _create_impl(self):
+    # Dill is used to encode special deterministic types in version <=2.66.0.
+    force_use_dill = _should_force_use_dill(
+        self._update_compatibility_version, coder=self._underlying_coder)
+
     return coder_impl.FastPrimitivesCoderImpl(
         self._underlying_coder.get_impl(),
-        requires_deterministic_step_label=self._step_label)
+        requires_deterministic_step_label=self._step_label,
+        force_use_dill=force_use_dill)
 
   def is_deterministic(self):
     # type: () -> bool
@@ -956,11 +1006,15 @@ class FastPrimitivesCoder(FastCoder):
     # type: () -> bool
     return self._fallback_coder.is_deterministic()
 
-  def as_deterministic_coder(self, step_label, error_message=None):
+  def as_deterministic_coder(
+      self, step_label, error_message=None, update_compatibility_version=None):
     if self.is_deterministic():
       return self
     else:
-      return DeterministicFastPrimitivesCoder(self, step_label)
+      return DeterministicFastPrimitivesCoder(
+          self,
+          step_label,
+          update_compatibility_version=update_compatibility_version)
 
   def to_type_hint(self):
     return Any

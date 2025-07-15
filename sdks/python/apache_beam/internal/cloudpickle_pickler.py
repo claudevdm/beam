@@ -39,6 +39,8 @@ from apache_beam.internal.cloudpickle import cloudpickle
 
 DEFAULT_CONFIG = cloudpickle.CloudPickleConfig(
     skip_reset_dynamic_type_state=True)
+NO_DYNAMIC_CLASS_TRACKING_CONFIG = cloudpickle.CloudPickleConfig(
+    id_generator=None, skip_reset_dynamic_type_state=True)
 
 try:
   from absl import flags
@@ -142,8 +144,11 @@ def dumps(
         pass
       if EnumDescriptor is not None:
         pickler.dispatch_table[EnumDescriptor] = _pickle_enum_descriptor
+      if hasattr(o, 'x'):
+        print('hi')
       pickler.dump(o)
       s = file.getvalue()
+      assert True
 
   # Compress as compactly as possible (compresslevel=9) to decrease peak memory
   # usage (of multiple in-memory copies) and to avoid hitting protocol buffer
