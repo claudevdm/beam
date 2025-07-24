@@ -885,7 +885,6 @@ class _MemoizingPickleCoder(_PickleCoderBase):
 
 
 def _pickle_coder_dumps(x):
-  logging.warning(f"CLAUDE _pickle_coder_dumps {x}")
   return pickle.dumps(x, pickle.HIGHEST_PROTOCOL)
 
 
@@ -921,7 +920,6 @@ import logging
 
 def is_compat_version_prior_to(
     update_compatibility_version, breaking_change_version):
-  logging.warning(f"CLAUDE {update_compatibility_version}")
   # This function is used in a branch statement to determine whether we should
   # keep the old behavior prior to a breaking change or use the new behavior.
   # - If update_compatibility_version < breaking_change_version, we will return

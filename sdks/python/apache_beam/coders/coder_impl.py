@@ -629,13 +629,17 @@ def _unpickle_type_266(bs):
   t = _unpickled_types.get(bs, None)
   if t is None:
     _verify_dill_compat()
-    t = _unpickled_types[bs] = dill.loads(bs)
+    try: 
+      t = _unpickled_types[bs] = dill.loads(bs)
+    except Exception as e:
+      _LOGGER.warning("Failed to unpickle using dill. Falling back to cloudpickle %s", e)
+      t = _unpickled_types[bs] = cloudpickle_pickler.loads(bs).loads(bs)
     # Fix unpicklable anonymous named tuples for Python 3.6.
     if t.__base__ is tuple and hasattr(t, '_fields'):
       try:
         pickle.loads(pickle.dumps(t))
       except pickle.PicklingError:
-        logging.warning(f"Fixing dill {t} __reduce__")
+        _LOGGER.warning(f"Fixing dill {t} __reduce__")
         t.__reduce__ = lambda self: (
             _unpickle_named_tuple_266, (bs, tuple(self)))
   return t
@@ -647,7 +651,12 @@ def _unpickle_named_tuple_266(bs, items):
 
 def _unpickle_type(bs):
   if not _unpickled_types.get(bs, None):
-    _unpickled_types[bs] = cloudpickle_pickler.loads(bs)
+    try: 
+      _unpickled_types[bs] = cloudpickle_pickler.loads(bs)
+    except Exception as e:
+      _LOGGER.warning("Failed to unpickle using cloudpickle. Falling back to dill %s", e)
+      _unpickled_types[bs] = dill.loads(bs)
+
   return _unpickled_types[bs]
 
 
