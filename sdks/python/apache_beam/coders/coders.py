@@ -986,6 +986,13 @@ class DeterministicFastPrimitivesCoder(FastCoder):
 
   def to_type_hint(self):
     return Any
+  
+  def to_runner_api_parameter(self, context):
+    # type: (Optional[PipelineContext]) -> Tuple[str, Any, Sequence[Coder]]
+    return (
+        python_urns.PICKLED_DETERMINISTIC_FAST_PRIMITIVES_CODER,
+        google.protobuf.wrappers_pb2.BytesValue(value=serialize_coder(self)),
+        ())
 
 
 class FastPrimitivesCoder(FastCoder):

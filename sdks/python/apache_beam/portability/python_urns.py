@@ -20,6 +20,7 @@
 For internal use only; no backwards-compatibility guarantees."""
 
 PICKLED_CODER = "beam:coder:pickled_python:v1"
+PICKLED_DETERMINISTIC_FAST_PRIMITIVES_CODER = "beam:coder:pickled_deterministic_fast_primitives_python:v1"
 PICKLED_COMBINE_FN = "beam:combinefn:pickled_python:v1"
 PICKLED_DOFN = "beam:dofn:pickled_python:v1"
 PICKLED_DOFN_INFO = "beam:dofn:pickled_python_info:v1"
