@@ -54,6 +54,7 @@ from typing import TypeVar
 from typing import overload
 
 import google.protobuf.wrappers_pb2
+import logging
 import proto
 from google.protobuf import message
 
@@ -915,60 +916,54 @@ class CloudpickleCoder(_PickleCoderBase):
         cloudpickle_pickler.dumps, cloudpickle_pickler.loads)
 
 
-import logging
-
-
-def is_compat_version_prior_to(
-    update_compatibility_version, breaking_change_version):
-  # This function is used in a branch statement to determine whether we should
-  # keep the old behavior prior to a breaking change or use the new behavior.
-  # - If update_compatibility_version < breaking_change_version, we will return
-  #   True and keep the old behavior.
-
-  if update_compatibility_version is None:
-    return False
-
-  compat_version = tuple(map(int, update_compatibility_version.split('.')[0:3]))
-  change_version = tuple(map(int, breaking_change_version.split('.')[0:3]))
-  for i in range(min(len(compat_version), len(change_version))):
-    if compat_version[i] < change_version[i]:
-      return True
-  return False
-
-
-def _should_force_use_dill(update_compatibility_version, coder):
-  force_use_dill = is_compat_version_prior_to(
-      update_compatibility_version=update_compatibility_version,
-      breaking_change_version="2.67.0")
-  if not force_use_dill:
-    return force_use_dill
-
-  try:
-    import dill
-    assert dill.__version__ == "0.3.1.1"
-  except Exception as e:
-    raise RuntimeError("Error using dill for encoding special types. Ensure" \
-                       " dill version '0.3.1.1' is installed in execution and" \
-                      f" runtime environment. Error {e}")
-  return force_use_dill
-
-
 class DeterministicFastPrimitivesCoder(FastCoder):
   """Throws runtime errors when encoding non-deterministic values."""
-  def __init__(self, coder, step_label, update_compatibility_version=None):
+  def __init__(self, coder, step_label):
     self._underlying_coder = coder
     self._step_label = step_label
-    self._update_compatibility_version = update_compatibility_version
 
   def _create_impl(self):
-    # Dill is used to encode special deterministic types in version <=2.66.0.
-    force_use_dill = _should_force_use_dill(
-        self._update_compatibility_version, coder=self._underlying_coder)
+
+    return coder_impl.FastPrimitivesCoderImpl(
+        self._underlying_coder.get_impl(),
+        requires_deterministic_step_label=self._step_label)
+
+  def is_deterministic(self):
+    # type: () -> bool
+    return True
+
+  def is_kv_coder(self):
+    # type: () -> bool
+    return True
+
+  def key_coder(self):
+    return self
+
+  def value_coder(self):
+    return self
+
+  def to_type_hint(self):
+    return Any
+  
+  def to_runner_api_parameter(self, context):
+    # type: (Optional[PipelineContext]) -> Tuple[str, Any, Sequence[Coder]]
+    return (
+        python_urns.PICKLED_DETERMINISTIC_FAST_PRIMITIVES_CODER,
+        google.protobuf.wrappers_pb2.BytesValue(value=serialize_coder(self)),
+        ())
+
+class DeterministicFastPrimitivesCoderV2(FastCoder):
+  """Throws runtime errors when encoding non-deterministic values."""
+  def __init__(self, coder, step_label):
+    self._underlying_coder = coder
+    self._step_label = step_label
+
+  def _create_impl(self):
 
     return coder_impl.FastPrimitivesCoderImpl(
         self._underlying_coder.get_impl(),
         requires_deterministic_step_label=self._step_label,
-        force_use_dill=force_use_dill)
+        force_use_dill=True)
 
   def is_deterministic(self):
     # type: () -> bool
@@ -995,6 +990,40 @@ class DeterministicFastPrimitivesCoder(FastCoder):
         ())
 
 
+def is_compat_version_prior_to(
+    update_compatibility_version, breaking_change_version):
+  # This function is used in a branch statement to determine whether we should
+  # keep the old behavior prior to a breaking change or use the new behavior.
+  # - If update_compatibility_version < breaking_change_version, we will return
+  #   True and keep the old behavior.
+
+  if update_compatibility_version is None:
+    return False
+
+  compat_version = tuple(map(int, update_compatibility_version.split('.')[0:3]))
+  change_version = tuple(map(int, breaking_change_version.split('.')[0:3]))
+  for i in range(min(len(compat_version), len(change_version))):
+    if compat_version[i] < change_version[i]:
+      return True
+  return False
+
+
+def _should_force_use_dill(update_compatibility_version):
+  force_use_dill = is_compat_version_prior_to(
+      update_compatibility_version=update_compatibility_version,
+      breaking_change_version="2.67.0")
+  if not force_use_dill:
+    return force_use_dill
+
+  try:
+    import dill
+    assert dill.__version__ == "0.3.1.1"
+  except Exception as e:
+    raise RuntimeError("Error using dill for encoding special types. Ensure" \
+                       " dill version '0.3.1.1' is installed in execution and" \
+                      f" runtime environment. Error {e}")
+  return force_use_dill
+
 class FastPrimitivesCoder(FastCoder):
   """Encodes simple primitives (e.g. str, int) efficiently.
 
@@ -1016,10 +1045,17 @@ class FastPrimitivesCoder(FastCoder):
     if self.is_deterministic():
       return self
     else:
-      return DeterministicFastPrimitivesCoder(
+      force_use_dill = _should_force_use_dill(
+        update_compatibility_version)
+      logging.warning(f"CLAUDE force_use_dill {force_use_dill} update_compatibility_version {update_compatibility_version}")
+      if force_use_dill:
+        return DeterministicFastPrimitivesCoder(
+            self,
+            step_label)
+
+      return DeterministicFastPrimitivesCoderV2(
           self,
-          step_label,
-          update_compatibility_version=update_compatibility_version)
+          step_label)
 
   def to_type_hint(self):
     return Any
