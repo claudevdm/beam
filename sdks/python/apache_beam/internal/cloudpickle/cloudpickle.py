@@ -1339,6 +1339,11 @@ class Pickler(pickle.Pickler):
 
     return (_make_function, newargs, state, None, None, _function_setstate)
 
+  def _create_dynamic_function_reduce(self, func):
+    if self.config.get_code_object_identifier:
+      return self._stable_identifier_dynamic_function_reduce(func)
+    return self._dynamic_function_reduce(func)
+
   def _function_reduce(self, obj):
     """Reducer for function objects.
 
@@ -1351,7 +1356,7 @@ class Pickler(pickle.Pickler):
     if _should_pickle_by_reference(obj):
       return NotImplemented
     else:
-      return self._dynamic_function_reduce(obj)
+      return self._create_dynamic_function_reduce(obj)
 
   def _function_getnewargs(self, func):
     code = func.__code__
@@ -1584,7 +1589,7 @@ class Pickler(pickle.Pickler):
         return self.save_pypy_builtin_func(obj)
       else:
         return self._save_reduce_pickle5(
-            *self._dynamic_function_reduce(obj), obj=obj)
+            *self._create_dynamic_function_reduce(obj), obj=obj)
 
     def save_pypy_builtin_func(self, obj):
       """Save pypy equivalent of builtin functions.
