@@ -36,11 +36,15 @@ import threading
 import zlib
 
 from apache_beam.internal.cloudpickle import cloudpickle
+from apache_beam.internal import code_object_pickler
 
 DEFAULT_CONFIG = cloudpickle.CloudPickleConfig(
     skip_reset_dynamic_type_state=True)
 NO_DYNAMIC_CLASS_TRACKING_CONFIG = cloudpickle.CloudPickleConfig(
     id_generator=None, skip_reset_dynamic_type_state=True)
+STABLE_CODE_IDENTIFIER_CONFIG = cloudpickle.CloudPickleConfig(
+    skip_reset_dynamic_type_state=True,
+    get_code_object_identifier=code_object_pickler.get_code_object_identifier)
 
 try:
   from absl import flags

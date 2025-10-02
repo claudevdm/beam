@@ -131,6 +131,7 @@ class CloudPickleConfig:
   id_generator: typing.Optional[callable] = uuid_generator
   skip_reset_dynamic_type_state: bool = False
   filepath_interceptor: typing.Optional[callable] = None
+  get_code_object_identifier: typing.Optional[callable] = None
 
 
 DEFAULT_CONFIG = CloudPickleConfig()
@@ -565,6 +566,12 @@ def _make_function(code, globals, name, argdefs, closure):
   # Setting __builtins__ in globals is needed for nogil CPython.
   globals["__builtins__"] = __builtins__
   return types.FunctionType(code, globals, name, argdefs, closure)
+
+
+def _make_function_from_identifier(
+    get_code_object_identifier, code_path, globals, name, argdefs, closure):
+  fcode = get_code_object_identifier(code_path)
+  return _make_function(fcode, globals, name, argdefs, closure)
 
 
 def _make_empty_cell():
@@ -1305,12 +1312,31 @@ class Pickler(pickle.Pickler):
 
   dispatch_table = ChainMap(_dispatch_table, copyreg.dispatch_table)
 
+  def _stable_identifier_dynamic_function_reduce(self, func):
+    code_path = self.config.get_code_object_identifier(func)
+    if not code_path:
+      return self._dynamic_function_reduce(func)
+
+    newargs = (code_path, )
+
+    return (
+        _make_function_from_identifier,
+        newargs,
+        state,
+        None,
+        None,
+        cloudpickle._function_setstate)
+
   # function reducers are defined as instance methods of cloudpickle.Pickler
   # objects, as they rely on a cloudpickle.Pickler attribute (globals_ref)
   def _dynamic_function_reduce(self, func):
     """Reduce a function that is not pickleable via attribute lookup."""
     newargs = self._function_getnewargs(func)
     state = _function_getstate(func)
+
+    if self.config.code_object_identifier:
+      code_path = self.config.code_object_identifier(func)
+
     return (_make_function, newargs, state, None, None, _function_setstate)
 
   def _function_reduce(self, obj):
