@@ -107,6 +107,12 @@ def uuid_generator(_):
   return uuid.uuid4().hex
 
 
+@dataclasses.datclass
+class GetCodeObjectParams:
+  get_code_object_identifier: typing.Optional[callable]
+  get_code_from_identifier: typing.Optional[callable]
+
+
 @dataclasses.dataclass
 class CloudPickleConfig:
   """Configuration for cloudpickle behavior.
@@ -127,11 +133,18 @@ class CloudPickleConfig:
             
         filepath_interceptor: Used to modify filepaths in `co_filename` and
             function.__globals__['__file__'].
+
+        get_code_object_params: Use identifiers derived from code
+            location when pickling dynamic functions (e.g. lambdas). Enabling
+            this setting results in pickled payloads becoming more stable to
+            code changes: when a particular lambda function is slightly
+            modified  but the location of the function in the codebase has not
+            changed, the pickled representation might stay the same.
     """
   id_generator: typing.Optional[callable] = uuid_generator
   skip_reset_dynamic_type_state: bool = False
   filepath_interceptor: typing.Optional[callable] = None
-  get_code_object_identifier: typing.Optional[callable] = None
+  get_code_object_params: typing.Optional[GetCodeObjectParams] = None
 
 
 DEFAULT_CONFIG = CloudPickleConfig()
@@ -569,8 +582,8 @@ def _make_function(code, globals, name, argdefs, closure):
 
 
 def _make_function_from_identifier(
-    get_code_object_identifier, code_path, globals, name, argdefs, closure):
-  fcode = get_code_object_identifier(code_path)
+    get_code_from_identifier, code_path, globals, name, argdefs, closure):
+  fcode = get_code_from_identifier(code_path)
   return _make_function(fcode, globals, name, argdefs, closure)
 
 
@@ -1312,20 +1325,22 @@ class Pickler(pickle.Pickler):
 
   dispatch_table = ChainMap(_dispatch_table, copyreg.dispatch_table)
 
-  def _stable_identifier_dynamic_function_reduce(self, func):
-    code_path = self.config.get_code_object_identifier(func)
+  def _stable_identifier_function_reduce(self, func):
+    code_path = self.config.get_code_object_params.get_code_object_identifier(
+        func)
     if not code_path:
       return self._dynamic_function_reduce(func)
-
     newargs = (code_path, )
-
+    state = _function_getstate(func)
     return (
-        _make_function_from_identifier,
+        functools.partial(
+            _make_function_from_identifier,
+            self.config.get_code_object_params.get_code_from_identifier),
         newargs,
         state,
         None,
         None,
-        cloudpickle._function_setstate)
+        _function_setstate)
 
   # function reducers are defined as instance methods of cloudpickle.Pickler
   # objects, as they rely on a cloudpickle.Pickler attribute (globals_ref)
@@ -1333,16 +1348,7 @@ class Pickler(pickle.Pickler):
     """Reduce a function that is not pickleable via attribute lookup."""
     newargs = self._function_getnewargs(func)
     state = _function_getstate(func)
-
-    if self.config.code_object_identifier:
-      code_path = self.config.code_object_identifier(func)
-
     return (_make_function, newargs, state, None, None, _function_setstate)
-
-  def _create_dynamic_function_reduce(self, func):
-    if self.config.get_code_object_identifier:
-      return self._stable_identifier_dynamic_function_reduce(func)
-    return self._dynamic_function_reduce(func)
 
   def _function_reduce(self, obj):
     """Reducer for function objects.
@@ -1355,8 +1361,10 @@ class Pickler(pickle.Pickler):
         """
     if _should_pickle_by_reference(obj):
       return NotImplemented
+    elif self.config.get_code_object_params is not None:
+      return self._stable_identifier_function_reduce(obj)
     else:
-      return self._create_dynamic_function_reduce(obj)
+      return self._dynamic_function_reduce(obj)
 
   def _function_getnewargs(self, func):
     code = func.__code__
@@ -1589,7 +1597,7 @@ class Pickler(pickle.Pickler):
         return self.save_pypy_builtin_func(obj)
       else:
         return self._save_reduce_pickle5(
-            *self._create_dynamic_function_reduce(obj), obj=obj)
+            *self._dynamic_function_reduce(obj), obj=obj)
 
     def save_pypy_builtin_func(self, obj):
       """Save pypy equivalent of builtin functions.
