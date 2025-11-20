@@ -88,6 +88,7 @@ public class BeamRowToStorageApiProto {
           .put(SqlTypes.TIME.getIdentifier(), TableFieldSchema.Type.TIME)
           .put(SqlTypes.DATETIME.getIdentifier(), TableFieldSchema.Type.DATETIME)
           .put(SqlTypes.TIMESTAMP.getIdentifier(), TableFieldSchema.Type.TIMESTAMP)
+          .put(SqlTypes.TIMESTAMP_NANOS.getIdentifier(), TableFieldSchema.Type.STRING)
           .put(EnumerationType.IDENTIFIER, TableFieldSchema.Type.STRING)
           .build();
 
@@ -137,6 +138,9 @@ public class BeamRowToStorageApiProto {
           .put(
               SqlTypes.TIMESTAMP.getIdentifier(),
               (logicalType, value) -> (ChronoUnit.MICROS.between(Instant.EPOCH, (Instant) value)))
+          .put(
+              SqlTypes.TIMESTAMP_NANOS.getIdentifier(),
+              (logicalType, value) -> ((Instant) value).toString())
           .put(
               EnumerationType.IDENTIFIER,
               (logicalType, value) ->

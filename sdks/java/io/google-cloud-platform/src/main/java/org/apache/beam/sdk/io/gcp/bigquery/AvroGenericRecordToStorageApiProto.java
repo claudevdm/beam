@@ -1,52 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-package org.apache.beam.sdk.io.gcp.bigquery;
-
-import com.google.cloud.bigquery.storage.v1.TableFieldSchema;
-import com.google.cloud.bigquery.storage.v1.TableSchema;
-import com.google.protobuf.ByteString;
-import com.google.protobuf.Descriptors.Descriptor;
-import com.google.protobuf.Descriptors.FieldDescriptor;
-import com.google.protobuf.DynamicMessage;
-import java.math.BigDecimal;
-import java.nio.ByteBuffer;
-import java.util.Map;
-import java.util.Optional;
-import java.util.UUID;
-import java.util.concurrent.TimeUnit;
-import java.util.function.BiFunction;
-import java.util.function.Function;
-import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
-import javax.annotation.Nullable;
-import org.apache.avro.Conversions;
-import org.apache.avro.LogicalType;
-import org.apache.avro.LogicalTypes;
-import org.apache.avro.Schema;
-import org.apache.avro.generic.GenericData;
-import org.apache.avro.generic.GenericRecord;
-import org.apache.beam.sdk.extensions.avro.schemas.utils.AvroUtils.TypeWithNullability;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Functions;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.Bytes;
-
 /**
  * Utility methods for converting Avro {@link GenericRecord} objects to dynamic protocol message,
  * for use with the Storage write API.
@@ -90,6 +41,8 @@ public class AvroGenericRecordToStorageApiProto {
         return Optional.of(TableFieldSchema.Type.TIMESTAMP);
       case "timestamp-millis":
         return Optional.of(TableFieldSchema.Type.TIMESTAMP);
+      case "timestamp-nanos":
+        return Optional.of(TableFieldSchema.Type.STRING);
       case "local-timestamp-micros":
         return Optional.of(TableFieldSchema.Type.DATETIME);
       case "local-timestamp-millis":
@@ -123,6 +76,7 @@ public class AvroGenericRecordToStorageApiProto {
           .put("decimal", AvroGenericRecordToStorageApiProto::convertDecimal)
           .put("timestamp-micros", (logicalType, value) -> convertTimestamp(value, true))
           .put("timestamp-millis", (logicalType, value) -> convertTimestamp(value, false))
+          .put("timestamp-nanos", (logicalType, value) -> convertNanosTimestamp((long) value))
           .put("local-timestamp-micros", (logicalType, value) -> convertDateTime(value, true))
           .put("local-timestamp-millis", (logicalType, value) -> convertDateTime(value, false))
           .put("uuid", (logicalType, value) -> convertUUID(value))
@@ -139,6 +93,7 @@ public class AvroGenericRecordToStorageApiProto {
   }
 
   static Long convertTimestamp(Object value, boolean micros) {
+    // Why does this support anython other than int64?
     if (value instanceof org.joda.time.ReadableInstant) {
       return ((org.joda.time.ReadableInstant) value).getMillis() * 1_000L;
     } else if (value instanceof java.time.Instant) {
@@ -159,6 +114,10 @@ public class AvroGenericRecordToStorageApiProto {
           value instanceof Long, "Expecting a value as Long type (timestamp).");
       return (micros ? 1 : 1_000L) * ((Long) value);
     }
+  }
+
+  static String convertNanosTimestamp(long epochNanos) {
+    return java.time.Instant.ofEpochSecond(0L, epochNanos).toString();
   }
 
   static Integer convertDate(Object value) {

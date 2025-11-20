@@ -111,6 +111,7 @@ import org.joda.time.Days;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.joda.time.ReadableInstant;
+import org.apache.beam.sdk.schemas.logicaltypes.Timestamp;
 
 /**
  * Utils to convert AVRO records to Beam rows. Imposes a mapping between common avro types and Beam
@@ -135,8 +136,6 @@ import org.joda.time.ReadableInstant;
  *   LogicalTypes.Date              <-----> LogicalType(DATE)
  *                                  <------ LogicalType(urn="beam:logical_type:date:v1")
  *   LogicalTypes.TimestampMillis   <-----> DATETIME
- *   LogicalTypes.TimestampMicros   ------> Long
- *   LogicalTypes.TimestampMicros   <------ LogicalType(urn="beam:logical_type:micros_instant:v1")
  *   LogicalTypes.Decimal           <-----> DECIMAL
  * </pre>
  *
@@ -179,8 +178,7 @@ public class AvroUtils {
       // getClassLoader returns @Nullable Classloader, but it's ok, as ReflectData constructor
       // actually tolerates null classloader argument despite lacking the @Nullable annotation
       @SuppressWarnings("nullness")
-      @NonNull
-      ClassLoader classLoader = clazz.getClassLoader();
+      @NonNull ClassLoader classLoader = clazz.getClassLoader();
       return new ReflectData(classLoader);
     }
 
@@ -1183,9 +1181,9 @@ public class AvroUtils {
           baseType = LogicalTypes.date().addToSchema(org.apache.avro.Schema.create(Type.INT));
         } else if ("TIME".equals(identifier)) {
           baseType = LogicalTypes.timeMillis().addToSchema(org.apache.avro.Schema.create(Type.INT));
-        } else if (SqlTypes.TIMESTAMP.getIdentifier().equals(identifier)) {
+        } else if (Timestamp.IDENTIFIER.equals(identifier)) {
           baseType =
-              LogicalTypes.timestampMicros().addToSchema(org.apache.avro.Schema.create(Type.LONG));
+              LogicalTypes.timestampNanos().addToSchema(org.apache.avro.Schema.create(Type.LONG));
         } else {
           throw new RuntimeException(
               "Unhandled logical type " + checkNotNull(fieldType.getLogicalType()).getIdentifier());
@@ -1221,15 +1219,6 @@ public class AvroUtils {
     return fieldType.getNullable() ? ReflectData.makeNullable(baseType) : baseType;
   }
 
-  private static final Map<org.apache.avro.Schema, Function<Number, ? extends Number>>
-      NUMERIC_CONVERTERS =
-          ImmutableMap.of(
-              org.apache.avro.Schema.create(Type.INT), Number::intValue,
-              org.apache.avro.Schema.create(Type.LONG), Number::longValue,
-              org.apache.avro.Schema.create(Type.FLOAT), Number::floatValue,
-              org.apache.avro.Schema.create(Type.DOUBLE), Number::doubleValue);
-
-  /** Convert a value from Beam Row to a vlue used for Avro GenericRecord. */
   private static @Nullable Object genericFromBeamField(
       FieldType fieldType, org.apache.avro.Schema avroSchema, @Nullable Object value) {
     TypeWithNullability typeWithNullability = new TypeWithNullability(avroSchema);
@@ -1246,11 +1235,6 @@ public class AvroUtils {
       return value;
     }
 
-    if (NUMERIC_CONVERTERS.containsKey(typeWithNullability.type)) {
-      return NUMERIC_CONVERTERS.get(typeWithNullability.type).apply((Number) value);
-    }
-
-    // TODO: should we use Avro Schema as the source-of-truth in general?
     switch (fieldType.getTypeName()) {
       case BYTE:
       case INT16:
@@ -1336,10 +1320,15 @@ public class AvroUtils {
           return ((java.time.LocalDate) value).toEpochDay();
         } else if ("TIME".equals(identifier)) {
           return (int) ((Instant) value).getMillis();
-        } else if (SqlTypes.TIMESTAMP.getIdentifier().equals(identifier)) {
+        } else if (Timestamp.IDENTIFIER.equals(identifier)) {
+          System.out.println("CLAUDETimestamp: " + value);
           java.time.Instant instant = (java.time.Instant) value;
-          return TimeUnit.SECONDS.toMicros(instant.getEpochSecond())
-              + TimeUnit.NANOSECONDS.toMicros(instant.getNano());
+          long epochSeconds = instant.getEpochSecond();
+          int nanoOfSecond = instant.getNano();
+          System.out.println(
+              "CLAUDE back to nanosInstant: "
+                  + java.time.Instant.ofEpochSecond(epochSeconds, nanoOfSecond));
+          return (epochSeconds * 1_000_000_000L) + nanoOfSecond;
         } else {
           throw new RuntimeException("Unhandled logical type " + identifier);
         }
