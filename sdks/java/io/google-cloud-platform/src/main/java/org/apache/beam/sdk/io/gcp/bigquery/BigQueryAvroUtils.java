@@ -54,7 +54,7 @@ import org.joda.time.format.DateTimeFormat;
 import org.joda.time.format.DateTimeFormatter;
 
 /** A set of utilities for working with Avro files. */
-class BigQueryAvroUtils {
+public class BigQueryAvroUtils {
 
   private static final String VERSION_AVRO =
       Optional.ofNullable(Schema.class.getPackage())
@@ -164,30 +164,98 @@ class BigQueryAvroUtils {
   private static final DateTimeFormatter DATE_AND_SECONDS_FORMATTER =
       DateTimeFormat.forPattern("yyyy-MM-dd HH:mm:ss").withZoneUTC();
 
+  /**
+   * Enum to define the precision of a timestamp since the epoch. It provides methods to normalize
+   * any precision to seconds and nanoseconds.
+   */
+  protected enum TimestampPrecision {
+    MILLISECONDS(1_000L, 1_000_000L),
+    MICROSECONDS(1_000_000L, 1_000L),
+    NANOSECONDS(1_000_000_000L, 1L);
+
+    private final long divisorForSeconds;
+    private final long nanoMultiplier;
+
+    TimestampPrecision(long divisorForSeconds, long nanoMultiplier) {
+      this.divisorForSeconds = divisorForSeconds;
+      this.nanoMultiplier = nanoMultiplier;
+    }
+
+    public long getDivisorForSeconds() {
+      return divisorForSeconds;
+    }
+
+    public long toNanos(long fractionalPart) {
+      return fractionalPart * this.nanoMultiplier;
+    }
+
+    public String formatFractional(long nanoOfSecond) {
+      if (nanoOfSecond % 1_000_000 == 0) {
+        return String.format(".%03d", nanoOfSecond / 1_000_000);
+      } else if (nanoOfSecond % 1000 == 0) {
+        return String.format(".%06d", nanoOfSecond / 1000);
+      } else {
+        return String.format(".%09d", nanoOfSecond);
+      }
+    }
+  }
+
   @VisibleForTesting
-  static String formatTimestamp(Long timestampMicro) {
-    String dateTime = formatDatetime(timestampMicro);
+  static String formatDateTime(long timestamp, TimestampPrecision precision) {
+    long divisor = precision.getDivisorForSeconds();
+    long timestampSec = timestamp / divisor;
+    long fractionalPart = timestamp % divisor;
+
+    if (fractionalPart < 0) {
+      fractionalPart += divisor;
+      timestampSec -= 1;
+    }
+
+    String dayAndTime = DATE_AND_SECONDS_FORMATTER.print(timestampSec * 1000);
+
+    long nanoOfSecond = precision.toNanos(fractionalPart);
+
+    if (nanoOfSecond == 0) {
+      return dayAndTime;
+    } else {
+      return dayAndTime + precision.formatFractional(nanoOfSecond);
+    }
+  }
+
+  static String formatTimestamp(long timestamp, TimestampPrecision precision) {
+    return formatDateTime(timestamp, precision) + " UTC";
+  }
+
+  @VisibleForTesting
+  static String formatTimestamp(Long timestampNano) {
+    String dateTime = formatDatetime(timestampNano);
     return dateTime + " UTC";
   }
 
   @VisibleForTesting
-  static String formatDatetime(Long timestampMicro) {
-    // timestampMicro is in "microseconds since epoch" format,
-    // e.g., 1452062291123456L means "2016-01-06 06:38:11.123456 UTC".
-    // Separate into seconds and microseconds.
-    long timestampSec = timestampMicro / 1_000_000;
-    long micros = timestampMicro % 1_000_000;
-    if (micros < 0) {
-      micros += 1_000_000;
+  static String formatDatetime(Long timestampNano) {
+    // timestampNano is in "nanoseconds since epoch" format,
+    // e.g., 1452062291123456789L means "2016-01-06 06:38:11.123456789 UTC".
+    // Separate into seconds and nanoseconds.
+    long timestampSec = timestampNano / 1_000_000_000L;
+    long nanos = timestampNano % 1_000_000_000L;
+    if (nanos < 0) {
+      nanos += 1_000_000_000L;
       timestampSec -= 1;
     }
     String dayAndTime = DATE_AND_SECONDS_FORMATTER.print(timestampSec * 1000);
-    if (micros == 0) {
+    System.out.println("nanos " + nanos);
+    if (nanos == 0) {
       return dayAndTime;
-    } else if (micros % 1000 == 0) {
-      return String.format("%s.%03d", dayAndTime, micros / 1000);
+    } else if (nanos % 1_000_000 == 0) {
+      // Millisecond precision (e.g., .123)
+      return String.format("%s.%03d", dayAndTime, nanos / 1_000_000);
+    } else if (nanos % 1000 == 0) {
+      // Microsecond precision (e.g., .123456)
+      return String.format("%s.%06d", dayAndTime, nanos / 1000);
     } else {
-      return String.format("%s.%06d", dayAndTime, micros);
+      // Full nanosecond precision (e.g., .123456789)
+      return String.format("%s.%09d", dayAndTime, nanos);
     }
   }
 
@@ -335,7 +403,9 @@ class BigQueryAvroUtils {
     // REQUIRED fields are represented as the corresponding Avro types. For example, a BigQuery
     // INTEGER type maps to an Avro LONG type.
     checkNotNull(v, "REQUIRED field %s should not be null", name);
-
+    System.out.println("convertRequiredField: " + name);
+    System.out.println("schema: " + schema);
+    System.out.println("v: " + v);
     Type type = schema.getType();
     LogicalType logicalType = schema.getLogicalType();
     switch (type) {
@@ -364,21 +434,25 @@ class BigQueryAvroUtils {
         } else if (logicalType instanceof LogicalTypes.TimestampMillis) {
           // Write only: SQL type TIMESTAMP
           // ideally Instant but TableRowJsonCoder encodes as String
-          return formatTimestamp((Long) v * 1000L);
+          return formatTimestamp((Long) v, TimestampPrecision.MILLISECONDS);
         } else if (logicalType instanceof LogicalTypes.TimestampMicros) {
           // SQL type TIMESTAMP
           // ideally Instant but TableRowJsonCoder encodes as String
-          return formatTimestamp((Long) v);
+          return formatTimestamp((Long) v, TimestampPrecision.MICROSECONDS);
+        } else if (logicalType != null && "timestamp-nanos".equals(logicalType.getName())) {
+          // SQL type TIMESTAMP
+          // ideally Instant but TableRowJsonCoder encodes as String
+          return formatTimestamp((Long) v, TimestampPrecision.NANOSECONDS);
         } else if (!(VERSION_AVRO.startsWith("1.8") || VERSION_AVRO.startsWith("1.9"))
             && logicalType instanceof LogicalTypes.LocalTimestampMillis) {
           // Write only: SQL type DATETIME
           // ideally LocalDateTime but TableRowJsonCoder encodes as String
-          return formatDatetime(((Long) v) * 1000);
+          return formatDateTime(((Long) v), TimestampPrecision.MILLISECONDS);
         } else if (!(VERSION_AVRO.startsWith("1.8") || VERSION_AVRO.startsWith("1.9"))
             && logicalType instanceof LogicalTypes.LocalTimestampMicros) {
           // Write only: SQL type DATETIME
           // ideally LocalDateTime but TableRowJsonCoder encodes as String
-          return formatDatetime((Long) v);
+          return formatDateTime(((Long) v), TimestampPrecision.MICROSECONDS);
         } else {
           // SQL type INT64 (INT, SMALLINT, INTEGER, BIGINT, TINYINT, BYTEINT)
           // ideally Long if in [2^53+1, 2^53-1] but keep consistency with BQ JSON export that uses
@@ -532,7 +606,7 @@ class BigQueryAvroUtils {
         (Object) null /* Cast to avoid deprecated JsonNode constructor. */);
   }
 
-  static TableSchema fromGenericAvroSchema(Schema schema) {
+  public static TableSchema fromGenericAvroSchema(Schema schema) {
     return fromGenericAvroSchema(schema, true);
   }
 
@@ -609,7 +683,8 @@ class BigQueryAvroUtils {
                 || logicalType instanceof LogicalTypes.LocalTimestampMicros)) {
           return fieldSchema.setType("DATETIME");
         } else if (logicalType instanceof LogicalTypes.TimestampMillis
-            || logicalType instanceof LogicalTypes.TimestampMicros) {
+            || logicalType instanceof LogicalTypes.TimestampMicros
+            || (logicalType != null && "timestamp-nanos".equals(logicalType.getName()))) {
           return fieldSchema.setType("TIMESTAMP");
         } else {
           return fieldSchema.setType("INTEGER");

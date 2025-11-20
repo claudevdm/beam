@@ -4175,6 +4175,9 @@ public class BigQueryIOWriteTest implements Serializable {
     final String datetime = "2019-08-16T00:52:07.123456";
     final String time = "00:52:07.123456";
 
+    TableRowToStorageApiProto.SchemaInformation schemaInfo =
+        TableRowToStorageApiProto.SchemaInformation.fromTableSchema(tableSchema);
+
     Function<Integer, Proto3SchemaMessages.PrimitiveEncodedFields> getPrimitive =
         (Integer i) -> {
           try {
@@ -4185,35 +4188,36 @@ public class BigQueryIOWriteTest implements Serializable {
                             .get(
                                 com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type
                                     .TIMESTAMP)
-                            .apply("", timestamp))
+                            .apply(schemaInfo.getSchemaForField("encoded_timestamp"), timestamp))
                 .setEncodedDate(
                     (int)
                         TYPE_MAP_PROTO_CONVERTERS
                             .get(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type.DATE)
-                            .apply("", date))
+                            .apply(schemaInfo.getSchemaForField("encoded_date"), date))
                 .setEncodedNumeric(
                     (ByteString)
                         TYPE_MAP_PROTO_CONVERTERS
                             .get(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type.NUMERIC)
-                            .apply("", numeric))
+                            .apply(schemaInfo.getSchemaForField("encoded_numeric"), numeric))
                 .setEncodedBignumeric(
                     (ByteString)
                         TYPE_MAP_PROTO_CONVERTERS
                             .get(
                                 com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type
                                     .BIGNUMERIC)
-                            .apply("", bignumeric))
+                            .apply(schemaInfo.getSchemaForField("encoded_bignumeric"), bignumeric))
                 .setEncodedPackedDatetime(
                     (long)
                         TYPE_MAP_PROTO_CONVERTERS
                             .get(
                                 com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type.DATETIME)
-                            .apply("", datetime))
+                            .apply(
+                                schemaInfo.getSchemaForField("encoded_packed_datetime"), datetime))
                 .setEncodedPackedTime(
                     (long)
                         TYPE_MAP_PROTO_CONVERTERS
                             .get(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type.TIME)
-                            .apply("", time))
+                            .apply(schemaInfo.getSchemaForField("encoded_packed_time"), time))
                 .build();
           } catch (TableRowToStorageApiProto.SchemaConversionException e) {
             throw new RuntimeException(e);
@@ -4455,13 +4459,15 @@ public class BigQueryIOWriteTest implements Serializable {
                         .setType("STRUCT")
                         .setMode("REPEATED")
                         .setFields(tableSchema.getFields())));
+    TableRowToStorageApiProto.SchemaInformation schemaInfo =
+        TableRowToStorageApiProto.SchemaInformation.fromTableSchema(tableSchema);
 
     final String timestamp = "1970-01-01 T00:00:00.000043";
     long timestampMicros =
         (long)
             TYPE_MAP_PROTO_CONVERTERS
                 .get(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type.TIMESTAMP)
-                .apply("", timestamp);
+                .apply(schemaInfo.getSchemaForField("timestamp"), timestamp);
 
     final FloatValue floatValue = FloatValue.newBuilder().setValue(42.4F).build();
     final DoubleValue doubleValue = DoubleValue.newBuilder().setValue(3.14D).build();

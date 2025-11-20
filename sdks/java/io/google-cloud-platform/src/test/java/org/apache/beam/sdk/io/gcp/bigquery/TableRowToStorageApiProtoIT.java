@@ -433,6 +433,8 @@ public class TableRowToStorageApiProtoIT {
     final String bignumeric = "123456789012345678";
     final String datetime = "2019-08-16T00:52:07.123456";
     final String time = "00:52:07.123456";
+    TableRowToStorageApiProto.SchemaInformation schemaInfo =
+        TableRowToStorageApiProto.SchemaInformation.fromTableSchema(PROTO_ENCODED_TABLE_SCHEMA);
 
     final Proto3SchemaMessages.PrimitiveEncodedFields baseRow =
         Proto3SchemaMessages.PrimitiveEncodedFields.newBuilder()
@@ -440,32 +442,32 @@ public class TableRowToStorageApiProtoIT {
                 (long)
                     TYPE_MAP_PROTO_CONVERTERS
                         .get(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type.TIMESTAMP)
-                        .apply("", timestamp))
+                        .apply(schemaInfo.getSchemaForField("encoded_timestamp"), timestamp))
             .setEncodedDate(
                 (int)
                     TYPE_MAP_PROTO_CONVERTERS
                         .get(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type.DATE)
-                        .apply("", date))
+                        .apply(schemaInfo.getSchemaForField("encoded_date"), date))
             .setEncodedNumeric(
                 (ByteString)
                     TYPE_MAP_PROTO_CONVERTERS
                         .get(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type.NUMERIC)
-                        .apply("", numeric))
+                        .apply(schemaInfo.getSchemaForField("encoded_numeric"), numeric))
             .setEncodedBignumeric(
                 (ByteString)
                     TYPE_MAP_PROTO_CONVERTERS
                         .get(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type.BIGNUMERIC)
-                        .apply("", bignumeric))
+                        .apply(schemaInfo.getSchemaForField("encoded_bignumeric"), bignumeric))
             .setEncodedPackedDatetime(
                 (long)
                     TYPE_MAP_PROTO_CONVERTERS
                         .get(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type.DATETIME)
-                        .apply("", datetime))
+                        .apply(schemaInfo.getSchemaForField("encoded_packed_datetime"), datetime))
             .setEncodedPackedTime(
                 (long)
                     TYPE_MAP_PROTO_CONVERTERS
                         .get(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type.TIME)
-                        .apply("", time))
+                        .apply(schemaInfo.getSchemaForField("encoded_packed_time"), time))
             .build();
 
     TableRow expected =

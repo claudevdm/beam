@@ -48,6 +48,7 @@ class BigQueryStorageArrowReader implements BigQueryStorageReader {
   public void processReadRowsResponse(ReadRowsResponse readRowsResponse) throws IOException {
     com.google.cloud.bigquery.storage.v1.ArrowRecordBatch recordBatch =
         readRowsResponse.getArrowRecordBatch();
+    System.out.println("CLAUDE BigQueryStorageArrowReader processReadRowsResponse");
     rowCount = recordBatch.getRowCount();
     InputStream input = protoSchema.getSerializedSchema().newInput();
     Schema arrowSchema = ArrowConversion.arrowSchemaFromInput(input);
@@ -69,9 +70,18 @@ class BigQueryStorageArrowReader implements BigQueryStorageReader {
       throw new IOException("Not Initialized");
     }
     Row row = recordBatchIterator.next();
+
+    System.out.println(
+        "CLAUDE BigQueryStorageArrowReader readSingleRecord row.getSchema() "
+            + row.getSchema()
+            + " row "
+            + row);
     // TODO(https://github.com/apache/beam/issues/21076): Update this interface to expect a Row, and
     // avoid converting Arrow data to
     // GenericRecord.
+    System.out.println(
+        "CLAUDE BigQueryStorageArrowReader AvroUtils.toGenericRecord(row, null) "
+            + AvroUtils.toGenericRecord(row, null));
     return AvroUtils.toGenericRecord(row, null);
   }
 

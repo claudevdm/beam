@@ -979,38 +979,49 @@ public class BigQueryAvroUtilsTest {
 
   @Test
   public void testFormatTimestamp() {
+    BigQueryAvroUtils.TimestampPrecision precision =
+        BigQueryAvroUtils.TimestampPrecision.MICROSECONDS;
     long micros = 1452062291123456L;
     String expected = "2016-01-06 06:38:11.123456";
-    assertThat(BigQueryAvroUtils.formatDatetime(micros), equalTo(expected));
-    assertThat(BigQueryAvroUtils.formatTimestamp(micros), equalTo(expected + " UTC"));
+    assertThat(BigQueryAvroUtils.formatDateTime(micros, precision), equalTo(expected));
+    assertThat(BigQueryAvroUtils.formatTimestamp(micros, precision), equalTo(expected + " UTC"));
   }
 
   @Test
   public void testFormatTimestampMillis() {
+    BigQueryAvroUtils.TimestampPrecision precision =
+        BigQueryAvroUtils.TimestampPrecision.MICROSECONDS;
     long millis = 1452062291123L;
     long micros = millis * 1000L;
     String expected = "2016-01-06 06:38:11.123";
-    assertThat(BigQueryAvroUtils.formatDatetime(micros), equalTo(expected));
-    assertThat(BigQueryAvroUtils.formatTimestamp(micros), equalTo(expected + " UTC"));
+    assertThat(BigQueryAvroUtils.formatDateTime(micros, precision), equalTo(expected));
+    assertThat(BigQueryAvroUtils.formatTimestamp(micros, precision), equalTo(expected + " UTC"));
   }
 
   @Test
   public void testFormatTimestampSeconds() {
+    BigQueryAvroUtils.TimestampPrecision precision =
+        BigQueryAvroUtils.TimestampPrecision.MICROSECONDS;
     long seconds = 1452062291L;
     long micros = seconds * 1000L * 1000L;
     String expected = "2016-01-06 06:38:11";
-    assertThat(BigQueryAvroUtils.formatDatetime(micros), equalTo(expected));
-    assertThat(BigQueryAvroUtils.formatTimestamp(micros), equalTo(expected + " UTC"));
+    assertThat(BigQueryAvroUtils.formatDateTime(micros, precision), equalTo(expected));
+    assertThat(BigQueryAvroUtils.formatTimestamp(micros, precision), equalTo(expected + " UTC"));
   }
 
   @Test
   public void testFormatTimestampNegative() {
-    assertThat(BigQueryAvroUtils.formatDatetime(-1L), equalTo("1969-12-31 23:59:59.999999"));
-    assertThat(BigQueryAvroUtils.formatDatetime(-100_000L), equalTo("1969-12-31 23:59:59.900"));
-    assertThat(BigQueryAvroUtils.formatDatetime(-1_000_000L), equalTo("1969-12-31 23:59:59"));
+    BigQueryAvroUtils.TimestampPrecision precision =
+        BigQueryAvroUtils.TimestampPrecision.MICROSECONDS;
+    assertThat(
+        BigQueryAvroUtils.formatDateTime(-1L, precision), equalTo("1969-12-31 23:59:59.999999"));
+    assertThat(
+        BigQueryAvroUtils.formatDateTime(-100_000L, precision), equalTo("1969-12-31 23:59:59.900"));
+    assertThat(
+        BigQueryAvroUtils.formatDateTime(-1_000_000L, precision), equalTo("1969-12-31 23:59:59"));
     // No leap seconds before 1972. 477 leap years from 1 through 1969.
     assertThat(
-        BigQueryAvroUtils.formatDatetime(-(1969L * 365 + 477) * 86400 * 1_000_000),
+        BigQueryAvroUtils.formatDateTime(-(1969L * 365 + 477) * 86400 * 1_000_000, precision),
         equalTo("0001-01-01 00:00:00"));
   }
 

@@ -675,6 +675,7 @@ public class BigQueryIO {
             BigQueryUtils.tableRowToBeamRow(),
             BigQueryUtils.tableRowFromBeamRow());
   }
+
   /** @deprecated this method may have breaking changes introduced, use with caution */
   @Deprecated
   public static DynamicRead<TableRow> readDynamicallyTableRows() {
@@ -794,6 +795,7 @@ public class BigQueryIO {
         .setProjectionPushdownApplied(false)
         .setBadRecordErrorHandler(new DefaultErrorHandler<>())
         .setBadRecordRouter(BadRecordRouter.THROWING_ROUTER)
+        .setTimestampPrecision(TypedRead.TimestampPrecision.DEFAULT)
         .build();
   }
 
@@ -824,6 +826,7 @@ public class BigQueryIO {
         .setProjectionPushdownApplied(false)
         .setBadRecordErrorHandler(new DefaultErrorHandler<>())
         .setBadRecordRouter(BadRecordRouter.THROWING_ROUTER)
+        .setTimestampPrecision(TypedRead.TimestampPrecision.DEFAULT)
         .build();
   }
 
@@ -837,6 +840,7 @@ public class BigQueryIO {
       return BigQueryAvroUtils.convertGenericRecordToTableRow(schemaAndRecord.getRecord());
     }
   }
+
   /** @deprecated this class may have breaking changes introduced, use with caution */
   @Deprecated
   @AutoValue
@@ -1184,6 +1188,24 @@ public class BigQueryIO {
       DIRECT_READ,
     }
 
+    /** Determines the timestamp precision used to read data from BigQuery. */
+    public enum TimestampPrecision {
+      /** The default behavior if no timestamp precision is explicitly set. */
+      DEFAULT,
+      /**
+       * Timestamps are read with nanosecond precision.
+       *
+       * <p>This is the default behavior.
+       */
+      NANOS,
+      /**
+       * Timestamps are read with picosecond precision.
+       *
+       * <p>This is the default behavior.
+       */
+      PICOS,
+    }
+
     interface ToBeamRowFunction<T>
         extends SerializableFunction<Schema, SerializableFunction<T, Row>> {}
 
@@ -1249,6 +1271,8 @@ public class BigQueryIO {
       abstract Builder<T> setBadRecordRouter(BadRecordRouter badRecordRouter);
 
       abstract Builder<T> setProjectionPushdownApplied(boolean projectionPushdownApplied);
+
+      abstract Builder<T> setTimestampPrecision(TimestampPrecision precision);
     }
 
     abstract @Nullable ValueProvider<String> getJsonTableRef();
@@ -1303,6 +1327,8 @@ public class BigQueryIO {
     abstract BadRecordRouter getBadRecordRouter();
 
     abstract boolean getProjectionPushdownApplied();
+
+    abstract TimestampPrecision getTimestampPrecision();
 
     /**
      * An enumeration type for the priority of a query.
@@ -1412,6 +1438,9 @@ public class BigQueryIO {
         checkArgument(
             getBadRecordRouter().equals(BadRecordRouter.THROWING_ROUTER),
             "BigQueryIO Read with Error Handling is only available when DIRECT_READ is used");
+        checkArgument(
+            getTimestampPrecision().equals(TypedRead.TimestampPrecision.DEFAULT),
+            "Timestamp precision is only available when DIRECT_READ is used");
       }
 
       ValueProvider<TableReference> table = getTableProvider();
@@ -2289,6 +2318,10 @@ public class BigQueryIO {
     /** See {@link Method}. */
     public TypedRead<T> withMethod(TypedRead.Method method) {
       return toBuilder().setMethod(method).build();
+    }
+
+    public TypedRead<T> withTimestampPrecision(TimestampPrecision timestampPrecision) {
+      return toBuilder().setTimestampPrecision(timestampPrecision).build();
     }
 
     /** See {@link DataFormat}. */
@@ -3748,31 +3781,35 @@ public class BigQueryIO {
         } else {
           checkArgument(
               getTriggeringFrequency() == null,
-              "Triggering frequency can be specified only when writing via FILE_LOADS or STORAGE_WRITE_API, but the method was %s.",
+              "Triggering frequency can be specified only when writing via FILE_LOADS or"
+                  + " STORAGE_WRITE_API, but the method was %s.",
               method);
         }
         if (method != Method.FILE_LOADS) {
           checkArgument(
               getNumFileShards() == 0,
-              "Number of file shards can be specified only when writing via FILE_LOADS, but the method was %s.",
+              "Number of file shards can be specified only when writing via FILE_LOADS, but the"
+                  + " method was %s.",
               method);
         }
         if (method == Method.STORAGE_API_AT_LEAST_ONCE
             && getStorageApiTriggeringFrequency(bqOptions) != null) {
           LOG.warn(
-              "Storage API triggering frequency option will be ignored is it can only be specified only "
-                  + "when writing via STORAGE_WRITE_API, but the method was {}.",
+              "Storage API triggering frequency option will be ignored is it can only be specified"
+                  + " only when writing via STORAGE_WRITE_API, but the method was {}.",
               method);
         }
         if (getAutoSharding()) {
           if (method == Method.STORAGE_WRITE_API && getStorageApiNumStreams(bqOptions) > 0) {
             LOG.warn(
-                "Both numStorageWriteApiStreams and auto-sharding options are set. Will default to auto-sharding."
-                    + " To set a fixed number of streams, do not enable auto-sharding.");
+                "Both numStorageWriteApiStreams and auto-sharding options are set. Will default to"
+                    + " auto-sharding. To set a fixed number of streams, do not enable"
+                    + " auto-sharding.");
           } else if (method == Method.FILE_LOADS && getNumFileShards() > 0) {
             LOG.warn(
-                "Both numFileShards and auto-sharding options are set. Will default to auto-sharding."
-                    + " To set a fixed number of file shards, do not enable auto-sharding.");
+                "Both numFileShards and auto-sharding options are set. Will default to"
+                    + " auto-sharding. To set a fixed number of file shards, do not enable"
+                    + " auto-sharding.");
           } else if (method == Method.STORAGE_API_AT_LEAST_ONCE) {
             LOG.warn(
                 "The setting of auto-sharding is ignored. It is only supported when writing an"
@@ -3803,16 +3840,19 @@ public class BigQueryIO {
 
       if (method == Method.STORAGE_API_AT_LEAST_ONCE && getStorageApiNumStreams(bqOptions) != 0) {
         LOG.warn(
-            "Setting a number of Storage API streams is only supported when using STORAGE_WRITE_API");
+            "Setting a number of Storage API streams is only supported when using"
+                + " STORAGE_WRITE_API");
       }
 
       if (method != Method.STORAGE_WRITE_API && method != Method.STORAGE_API_AT_LEAST_ONCE) {
         checkArgument(
             !getAutoSchemaUpdate(),
-            "withAutoSchemaUpdate only supported when using STORAGE_WRITE_API or STORAGE_API_AT_LEAST_ONCE.");
+            "withAutoSchemaUpdate only supported when using STORAGE_WRITE_API or"
+                + " STORAGE_API_AT_LEAST_ONCE.");
         checkArgument(
             getBigLakeConfiguration() == null,
-            "bigLakeConfiguration is only supported when using STORAGE_WRITE_API or STORAGE_API_AT_LEAST_ONCE.");
+            "bigLakeConfiguration is only supported when using STORAGE_WRITE_API or"
+                + " STORAGE_API_AT_LEAST_ONCE.");
       } else {
         if (getWriteDisposition() == WriteDisposition.WRITE_TRUNCATE) {
           LOG.error("The Storage API sink does not support the WRITE_TRUNCATE write disposition.");
@@ -3833,7 +3873,8 @@ public class BigQueryIO {
                 + " \"at least once\" mode.");
         checkArgument(
             getCreateDisposition() == CreateDisposition.CREATE_NEVER || getPrimaryKey() != null,
-            "If specifying CREATE_IF_NEEDED along with row updates, a primary key needs to be specified");
+            "If specifying CREATE_IF_NEEDED along with row updates, a primary key needs to be"
+                + " specified");
       }
       if (getPrimaryKey() != null) {
         checkArgument(
@@ -4066,7 +4107,8 @@ public class BigQueryIO {
             "SchemaUpdateOptions are not supported when method == STREAMING_INSERTS");
         checkArgument(
             !getPropagateSuccessfulStorageApiWrites(),
-            "withPropagateSuccessfulStorageApiWrites only supported when using storage api writes.");
+            "withPropagateSuccessfulStorageApiWrites only supported when using storage api"
+                + " writes.");
         checkArgument(
             getBadRecordRouter() instanceof ThrowingBadRecordRouter,
             "Error Handling is not supported with STREAMING_INSERTS");
@@ -4103,10 +4145,12 @@ public class BigQueryIO {
         }
         checkArgument(
             !getPropagateSuccessfulStorageApiWrites(),
-            "withPropagateSuccessfulStorageApiWrites only supported when using storage api writes.");
+            "withPropagateSuccessfulStorageApiWrites only supported when using storage api"
+                + " writes.");
         if (!(getBadRecordRouter() instanceof ThrowingBadRecordRouter)) {
           LOG.warn(
-              "Error Handling is partially supported when using FILE_LOADS. Consider using STORAGE_WRITE_API or STORAGE_API_AT_LEAST_ONCE");
+              "Error Handling is partially supported when using FILE_LOADS. Consider using"
+                  + " STORAGE_WRITE_API or STORAGE_API_AT_LEAST_ONCE");
         }
 
         // Batch load handles wrapped json string value differently than the other methods. Raise a
@@ -4117,16 +4161,17 @@ public class BigQueryIO {
             if (rowWriterFactory.getOutputType() == OutputType.JsonTableRow) {
               LOG.warn(
                   "Found JSON type in TableSchema for 'FILE_LOADS' write method. \n"
-                      + "Make sure the TableRow value is a Jackson JsonNode to ensure the read as a "
-                      + "JSON type. Otherwise it will read as a raw (escaped) string.\n"
-                      + "See https://cloud.google.com/bigquery/docs/loading-data-cloud-storage-json#limitations "
-                      + "for limitations.");
+                      + "Make sure the TableRow value is a Jackson JsonNode to ensure the read as a"
+                      + " JSON type. Otherwise it will read as a raw (escaped) string.\n"
+                      + "See https://cloud.google.com/bigquery/docs/loading-data-cloud-storage-json#limitations"
+                      + " for limitations.");
             } else if (rowWriterFactory.getOutputType() == OutputType.AvroGenericRecord) {
               LOG.warn(
                   "Found JSON type in TableSchema for 'FILE_LOADS' write method. \n"
-                      + " check steps in https://cloud.google.com/bigquery/docs/loading-data-cloud-storage-avro#extract_json_data_from_avro_data "
-                      + " to ensure the read as a JSON type. Otherwise it will read as a raw "
-                      + "(escaped) string.");
+                      + " check steps in"
+                      + " https://cloud.google.com/bigquery/docs/loading-data-cloud-storage-avro#extract_json_data_from_avro_data"
+                      + "  to ensure the read as a JSON type. Otherwise it will read as a raw"
+                      + " (escaped) string.");
             }
           }
         }

@@ -200,14 +200,17 @@ public class TableRowToStorageApiProto {
       new DecimalFormat("0.0###############", DecimalFormatSymbols.getInstance(Locale.ROOT));
 
   // Map of functions to convert json values into the value expected in the Vortex proto object.
-  static final Map<TableFieldSchema.Type, ThrowingBiFunction<String, Object, @Nullable Object>>
+  static final Map<
+          TableFieldSchema.Type, ThrowingBiFunction<SchemaInformation, Object, @Nullable Object>>
       TYPE_MAP_PROTO_CONVERTERS =
           ImmutableMap
-              .<TableFieldSchema.Type, ThrowingBiFunction<String, Object, @Nullable Object>>
+              .<TableFieldSchema.Type,
+                  ThrowingBiFunction<SchemaInformation, Object, @Nullable Object>>
                   builder()
               .put(
                   TableFieldSchema.Type.INT64,
-                  (fullName, value) -> {
+                  (schemaInformation, value) -> {
+                    String fullName = schemaInformation.getFullName();
                     if (value instanceof String) {
                       try {
                         return Long.valueOf((String) value);
@@ -269,7 +272,14 @@ public class TableRowToStorageApiProto {
               .put(
                   TableFieldSchema.Type.TIMESTAMP,
                   (schemaInformation, value) -> {
+                    System.out.println(
+                        "CLAUDE TableRowToStorageApiProto.TIMESTAMP value: " + value);
+                    // Or look at message descriptor type?
                     if (value instanceof String) {
+                      if (schemaInformation.getPrecision() >= 9) {
+                        System.out.println("CLAUDE returning " + value);
+                        return value;
+                      }
                       try {
                         // '2011-12-03T10:15:30Z', '2011-12-03 10:15:30+05:00'
                         // '2011-12-03 10:15:30 UTC', '2011-12-03T10:15:30 America/New_York'
@@ -533,6 +543,9 @@ public class TableRowToStorageApiProto {
     if (field.getScale() != null) {
       builder.setScale(field.getScale());
     }
+    if (field.getTimestampPrecision() != null) {
+      builder.setPrecision(field.getTimestampPrecision());
+    }
     builder.setType(typeToProtoType(field.getType()));
     if (builder.getType().equals(TableFieldSchema.Type.STRUCT)) {
       for (com.google.api.services.bigquery.model.TableFieldSchema subField : field.getFields()) {
@@ -573,6 +586,10 @@ public class TableRowToStorageApiProto {
 
     public String getName() {
       return tableFieldSchema.getName();
+    }
+
+    public long getPrecision() {
+      return tableFieldSchema.getPrecision();
     }
 
     public TableFieldSchema.Type getType() {
@@ -631,7 +648,6 @@ public class TableRowToStorageApiProto {
           .put(TableFieldSchema.Type.DATE, Type.TYPE_INT32)
           .put(TableFieldSchema.Type.TIME, Type.TYPE_INT64)
           .put(TableFieldSchema.Type.DATETIME, Type.TYPE_INT64)
-          .put(TableFieldSchema.Type.TIMESTAMP, Type.TYPE_INT64)
           .put(TableFieldSchema.Type.JSON, Type.TYPE_STRING)
           .build();
 
@@ -764,6 +780,7 @@ public class TableRowToStorageApiProto {
           unknownFields.remove(key);
         }
       } catch (Exception e) {
+        System.out.println("CLAUDE Exception: " + e);
         throw new SchemaDoesntMatchException(
             "Problem converting field "
                 + fieldSchemaInformation.getFullName()
@@ -1051,6 +1068,7 @@ public class TableRowToStorageApiProto {
           fieldDescriptorBuilder.setOptions(
               (DescriptorProtos.FieldOptions) fieldOptionBuilder.build());
     }
+    System.out.println("CLAUDE fieldSchema: " + fieldSchema);
     switch (fieldSchema.getType()) {
       case STRUCT:
         DescriptorProto nested =
@@ -1059,6 +1077,34 @@ public class TableRowToStorageApiProto {
         descriptorBuilder.addNestedType(nested);
         fieldDescriptorBuilder =
             fieldDescriptorBuilder.setType(Type.TYPE_MESSAGE).setTypeName(nested.getName());
+        break;
+      case TIMESTAMP:
+        System.out.println("CLAUDE case TIMESTAMP: ");
+        if (fieldSchema.getPrecision() >= 9) {
+          DescriptorProto timestampPicosDescriptor =
+              DescriptorProto.newBuilder()
+                  .setName("TimestampPicosx")
+                  .addField(
+                      DescriptorProtos.FieldDescriptorProto.newBuilder()
+                          .setName("seconds")
+                          .setNumber(1)
+                          .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
+                          .build())
+                  .addField(
+                      DescriptorProtos.FieldDescriptorProto.newBuilder()
+                          .setName("picoseconds")
+                          .setNumber(2)
+                          .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
+                          .build())
+                  .build();
+          descriptorBuilder.addNestedType(timestampPicosDescriptor);
+          fieldDescriptorBuilder =
+              fieldDescriptorBuilder
+                  .setType(Type.TYPE_MESSAGE)
+                  .setTypeName(timestampPicosDescriptor.getName());
+        } else {
+          fieldDescriptorBuilder = fieldDescriptorBuilder.setType(Type.TYPE_INT64);
+        }
         break;
       default:
         @Nullable Type type = PRIMITIVE_TYPES_BQ_TO_PROTO.get(fieldSchema.getType());
@@ -1286,6 +1332,13 @@ public class TableRowToStorageApiProto {
       Supplier<@Nullable TableRow> getUnknownNestedFields)
       throws SchemaConversionException {
     @Nullable Object converted = null;
+    System.out.println(
+        "CLAUDE singularFieldToProtoValue: "
+            + schemaInformation.getType()
+            + " fieldDescriptor.getMessageType() "
+            + fieldDescriptor.getType()
+            + "value "
+            + value);
     if (schemaInformation.getType() == TableFieldSchema.Type.STRUCT) {
       if (value instanceof TableRow) {
         TableRow tableRow = (TableRow) value;
@@ -1313,14 +1366,63 @@ public class TableRowToStorageApiProto {
                 null,
                 null);
       }
+    } else if (schemaInformation.getType() == TableFieldSchema.Type.TIMESTAMP
+        && schemaInformation.getPrecision() >= 9) {
+
+      Instant timestamp = null;
+      if (value instanceof String) {
+        try {
+          // '2011-12-03T10:15:30Z', '2011-12-03 10:15:30+05:00'
+          // '2011-12-03 10:15:30 UTC', '2011-12-03T10:15:30 America/New_York'
+          timestamp = Instant.from(TIMESTAMP_FORMATTER.parse((String) value));
+
+        } catch (DateTimeException e) {
+          try {
+            // for backwards compatibility, default time zone is UTC for values with
+            // no time-zone
+            // '2011-12-03T10:15:30'
+            timestamp =
+                Instant.from(TIMESTAMP_FORMATTER.withZone(ZoneOffset.UTC).parse((String) value));
+          } catch (DateTimeParseException err) {
+            // "12345667"
+            timestamp = Instant.ofEpochMilli(Long.parseLong((String) value));
+          }
+        }
+      } else if (value instanceof Instant) {
+        return timestamp = (Instant) value;
+      }
+      // } else if (value instanceof org.joda.time.Instant) {
+      //   // joda instant precision is millisecond
+      //   return ((org.joda.time.Instant) value).getMillis() * 1000L;
+      // } else if (value instanceof Integer || value instanceof Long) {
+      //   return ((Number) value).longValue();
+      // } else if (value instanceof Double || value instanceof Float) {
+      //   // assume value represents number of seconds since epoch
+      //   return BigDecimal.valueOf(((Number) value).doubleValue())
+      //       .scaleByPowerOfTen(6)
+      //       .setScale(0, RoundingMode.HALF_UP)
+      //       .longValue();
+      // }
+      if (timestamp == null) {
+        return null;
+      }
+      long seconds = timestamp.getEpochSecond();
+      int nanos = timestamp.getNano();
+      long picoseconds = nanos * 1000L;
+      converted =
+          DynamicMessage.newBuilder(fieldDescriptor.getMessageType())
+              .setField(fieldDescriptor.getMessageType().findFieldByName("seconds"), seconds)
+              .setField(
+                  fieldDescriptor.getMessageType().findFieldByName("picoseconds"), picoseconds)
+              .build();
     } else {
       @Nullable
-      ThrowingBiFunction<String, Object, @Nullable Object> converter =
+      ThrowingBiFunction<SchemaInformation, Object, @Nullable Object> converter =
           TYPE_MAP_PROTO_CONVERTERS.get(schemaInformation.getType());
       if (converter == null) {
         throw new RuntimeException("Unknown type " + schemaInformation.getType());
       }
-      converted = converter.apply(schemaInformation.getFullName(), value);
+      converted = converter.apply(schemaInformation, value);
     }
     if (converted == null) {
       throw new SchemaDoesntMatchException(

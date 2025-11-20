@@ -90,6 +90,8 @@ public class AvroGenericRecordToStorageApiProto {
         return Optional.of(TableFieldSchema.Type.TIMESTAMP);
       case "timestamp-millis":
         return Optional.of(TableFieldSchema.Type.TIMESTAMP);
+      case "timestamp-nanos":
+        return Optional.of(TableFieldSchema.Type.STRING);
       case "local-timestamp-micros":
         return Optional.of(TableFieldSchema.Type.DATETIME);
       case "local-timestamp-millis":
@@ -123,6 +125,7 @@ public class AvroGenericRecordToStorageApiProto {
           .put("decimal", AvroGenericRecordToStorageApiProto::convertDecimal)
           .put("timestamp-micros", (logicalType, value) -> convertTimestamp(value, true))
           .put("timestamp-millis", (logicalType, value) -> convertTimestamp(value, false))
+          .put("timestamp-nanos", (logicalType, value) -> convertNanosTimestamp((long) value))
           .put("local-timestamp-micros", (logicalType, value) -> convertDateTime(value, true))
           .put("local-timestamp-millis", (logicalType, value) -> convertDateTime(value, false))
           .put("uuid", (logicalType, value) -> convertUUID(value))
@@ -139,6 +142,7 @@ public class AvroGenericRecordToStorageApiProto {
   }
 
   static Long convertTimestamp(Object value, boolean micros) {
+    // Why does this support anython other than int64?
     if (value instanceof org.joda.time.ReadableInstant) {
       return ((org.joda.time.ReadableInstant) value).getMillis() * 1_000L;
     } else if (value instanceof java.time.Instant) {
@@ -159,6 +163,10 @@ public class AvroGenericRecordToStorageApiProto {
           value instanceof Long, "Expecting a value as Long type (timestamp).");
       return (micros ? 1 : 1_000L) * ((Long) value);
     }
+  }
+
+  static String convertNanosTimestamp(long epochNanos) {
+    return java.time.Instant.ofEpochSecond(0L, epochNanos).toString();
   }
 
   static Integer convertDate(Object value) {

@@ -40,4 +40,6 @@ public class SqlTypes {
 
   /** Beam LogicalType corresponding to TIMESTAMP type. */
   public static final LogicalType<Instant, Row> TIMESTAMP = new MicrosInstant();
+
+  public static final LogicalType<Instant, Row> TIMESTAMP_NANOS = Timestamp.NANOS;
 }

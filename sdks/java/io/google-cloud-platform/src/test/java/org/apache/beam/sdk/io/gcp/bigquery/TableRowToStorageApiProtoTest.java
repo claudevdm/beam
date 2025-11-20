@@ -1394,7 +1394,10 @@ public class TableRowToStorageApiProtoTest {
         == com.google.cloud.bigquery.storage.v1.TableFieldSchema.Type.STRUCT) {
       return normalizeTableRow((TableRow) value, schemaInformation, outputUsingF);
     } else {
-      convertedValue = TYPE_MAP_PROTO_CONVERTERS.get(schemaInformation.getType()).apply("", value);
+      convertedValue =
+          TYPE_MAP_PROTO_CONVERTERS
+              .get(schemaInformation.getType())
+              .apply(schemaInformation, value);
       switch (schemaInformation.getType()) {
         case BOOL:
         case JSON:
@@ -1407,7 +1410,9 @@ public class TableRowToStorageApiProtoTest {
         case BYTES:
           ByteString byteString =
               (ByteString)
-                  TYPE_MAP_PROTO_CONVERTERS.get(schemaInformation.getType()).apply("", value);
+                  TYPE_MAP_PROTO_CONVERTERS
+                      .get(schemaInformation.getType())
+                      .apply(schemaInformation, value);
           return BaseEncoding.base64().encode(byteString.toByteArray());
         case TIMESTAMP:
           long timestampLongValue = (long) convertedValue;

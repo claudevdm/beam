@@ -245,4 +245,23 @@ public interface BigQueryOptions
   Boolean getGroupFilesFileLoad();
 
   void setGroupFilesFileLoad(Boolean value);
+
+  /**
+   * The timestamp precision to use when reading from or witing to BigQuery with Storage API.
+   *
+   * <p>If not set, the default precision used by BigQuery API's will be used.
+   */
+  enum TimestampPrecision {
+    DEFAULT,
+    NANOS,
+    PICOS
+  }
+
+  @Description(
+      "The timestamp precision to use when reading from BigQuery. If not set, the default"
+          + " precision will be used.")
+  @Default.Enum("DEFAULT")
+  TimestampPrecision getBigQueryTimestampPrecision();
+
+  void setBigQueryTimestampPrecision(TimestampPrecision value);
 }

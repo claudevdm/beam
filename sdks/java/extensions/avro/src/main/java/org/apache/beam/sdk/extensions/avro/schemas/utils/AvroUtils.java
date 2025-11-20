@@ -36,7 +36,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
 import net.bytebuddy.description.type.TypeDescription.ForLoadedType;
@@ -81,6 +80,7 @@ import org.apache.beam.sdk.schemas.logicaltypes.FixedBytes;
 import org.apache.beam.sdk.schemas.logicaltypes.FixedString;
 import org.apache.beam.sdk.schemas.logicaltypes.OneOfType;
 import org.apache.beam.sdk.schemas.logicaltypes.SqlTypes;
+import org.apache.beam.sdk.schemas.logicaltypes.Timestamp;
 import org.apache.beam.sdk.schemas.logicaltypes.VariableBytes;
 import org.apache.beam.sdk.schemas.logicaltypes.VariableString;
 import org.apache.beam.sdk.schemas.utils.ByteBuddyUtils.ConvertType;
@@ -98,7 +98,6 @@ import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.CaseFormat;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Maps;
@@ -1186,6 +1185,9 @@ public class AvroUtils {
         } else if (SqlTypes.TIMESTAMP.getIdentifier().equals(identifier)) {
           baseType =
               LogicalTypes.timestampMicros().addToSchema(org.apache.avro.Schema.create(Type.LONG));
+        } else if (Timestamp.IDENTIFIER.equals(identifier)) {
+          String schemaJson = "{\"type\": \"long\", \"logicalType\": \"timestamp-nanos\"}";
+          baseType = new org.apache.avro.Schema.Parser().parse(schemaJson);
         } else {
           throw new RuntimeException(
               "Unhandled logical type " + checkNotNull(fieldType.getLogicalType()).getIdentifier());
@@ -1221,15 +1223,6 @@ public class AvroUtils {
     return fieldType.getNullable() ? ReflectData.makeNullable(baseType) : baseType;
   }
 
-  private static final Map<org.apache.avro.Schema, Function<Number, ? extends Number>>
-      NUMERIC_CONVERTERS =
-          ImmutableMap.of(
-              org.apache.avro.Schema.create(Type.INT), Number::intValue,
-              org.apache.avro.Schema.create(Type.LONG), Number::longValue,
-              org.apache.avro.Schema.create(Type.FLOAT), Number::floatValue,
-              org.apache.avro.Schema.create(Type.DOUBLE), Number::doubleValue);
-
-  /** Convert a value from Beam Row to a vlue used for Avro GenericRecord. */
   private static @Nullable Object genericFromBeamField(
       FieldType fieldType, org.apache.avro.Schema avroSchema, @Nullable Object value) {
     TypeWithNullability typeWithNullability = new TypeWithNullability(avroSchema);
@@ -1246,11 +1239,6 @@ public class AvroUtils {
       return value;
     }
 
-    if (NUMERIC_CONVERTERS.containsKey(typeWithNullability.type)) {
-      return NUMERIC_CONVERTERS.get(typeWithNullability.type).apply((Number) value);
-    }
-
-    // TODO: should we use Avro Schema as the source-of-truth in general?
     switch (fieldType.getTypeName()) {
       case BYTE:
       case INT16:
@@ -1340,6 +1328,15 @@ public class AvroUtils {
           java.time.Instant instant = (java.time.Instant) value;
           return TimeUnit.SECONDS.toMicros(instant.getEpochSecond())
               + TimeUnit.NANOSECONDS.toMicros(instant.getNano());
+        } else if (Timestamp.IDENTIFIER.equals(identifier)) {
+          System.out.println("CLAUDETimestamp: " + value);
+          java.time.Instant instant = (java.time.Instant) value;
+          long epochSeconds = instant.getEpochSecond();
+          int nanoOfSecond = instant.getNano();
+          System.out.println(
+              "CLAUDE back to nanosInstant: "
+                  + java.time.Instant.ofEpochSecond(epochSeconds, nanoOfSecond));
+          return (epochSeconds * 1_000_000_000L) + nanoOfSecond;
         } else {
           throw new RuntimeException("Unhandled logical type " + identifier);
         }
@@ -1421,6 +1418,10 @@ public class AvroUtils {
         return convertDateTimeStrict(
             checkRawType(Long.class, value, logicalType, rawType, conversion, convertedType),
             fieldType);
+      case "timestamp-nanos":
+        Long nanos =
+            checkRawType(Long.class, value, logicalType, rawType, conversion, convertedType);
+        return java.time.Instant.ofEpochSecond(0L, nanos);
       case "decimal":
         {
           if (rawType instanceof GenericFixed) {

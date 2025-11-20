@@ -67,6 +67,7 @@ import org.apache.beam.sdk.schemas.Schema.TypeName;
 import org.apache.beam.sdk.schemas.logicaltypes.EnumerationType;
 import org.apache.beam.sdk.schemas.logicaltypes.PassThroughLogicalType;
 import org.apache.beam.sdk.schemas.logicaltypes.SqlTypes;
+import org.apache.beam.sdk.schemas.logicaltypes.Timestamp;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.SerializableFunctions;
 import org.apache.beam.sdk.util.Preconditions;
@@ -309,6 +310,7 @@ public class BigQueryUtils {
           .put(SqlTypes.TIME.getIdentifier(), StandardSQLTypeName.TIME)
           .put(SqlTypes.DATETIME.getIdentifier(), StandardSQLTypeName.DATETIME)
           .put(SqlTypes.TIMESTAMP.getIdentifier(), StandardSQLTypeName.TIMESTAMP)
+          .put(SqlTypes.TIMESTAMP_NANOS.getIdentifier(), StandardSQLTypeName.TIMESTAMP)
           .put("SqlTimeWithLocalTzType", StandardSQLTypeName.TIME)
           .put("Enum", StandardSQLTypeName.STRING)
           .build();
@@ -355,9 +357,12 @@ public class BigQueryUtils {
    * @return Corresponding Beam {@link FieldType}
    */
   private static FieldType fromTableFieldSchemaType(
-      String typeName, List<TableFieldSchema> nestedFields, SchemaConversionOptions options) {
+      TableFieldSchema schema,
+      List<TableFieldSchema> nestedFields,
+      SchemaConversionOptions options) {
     // see
     // https://googleapis.dev/java/google-api-services-bigquery/latest/com/google/api/services/bigquery/model/TableFieldSchema.html#getType--
+    String typeName = schema.getType();
     switch (typeName) {
       case "STRING":
         return FieldType.STRING;
@@ -373,6 +378,18 @@ public class BigQueryUtils {
       case "BOOL":
         return FieldType.BOOLEAN;
       case "TIMESTAMP":
+        System.out.println("CLAUDE BigQueryUtils fromTableFieldSchemaType TIMESTAMP" + schema);
+        if (schema.getTimestampPrecision() == null) {
+          return FieldType.DATETIME;
+        }
+        // This will always be nanos even if reading micros or picos. Should pass the read precision
+        // somehow.
+        // if (schema.getTimestampPrecision() == 12) {
+        //   return FieldType.STRING;
+        // }
+        if (schema.getTimestampPrecision() == 12) {
+          return FieldType.logicalType(Timestamp.NANOS);
+        }
         return FieldType.DATETIME;
       case "DATE":
         return FieldType.logicalType(SqlTypes.DATE);
@@ -395,8 +412,8 @@ public class BigQueryUtils {
           if (BIGQUERY_MAP_KEY_FIELD_NAME.equals(key.getName())
               && BIGQUERY_MAP_VALUE_FIELD_NAME.equals(value.getName())) {
             return FieldType.map(
-                fromTableFieldSchemaType(key.getType(), key.getFields(), options),
-                fromTableFieldSchemaType(value.getType(), value.getFields(), options));
+                fromTableFieldSchemaType(key, key.getFields(), options),
+                fromTableFieldSchemaType(value, value.getFields(), options));
           }
         }
         Schema rowSchema = fromTableFieldSchema(nestedFields, options);
@@ -413,8 +430,7 @@ public class BigQueryUtils {
     Schema.Builder schemaBuilder = Schema.builder();
     for (TableFieldSchema tableFieldSchema : tableFieldSchemas) {
       FieldType fieldType =
-          fromTableFieldSchemaType(
-              tableFieldSchema.getType(), tableFieldSchema.getFields(), options);
+          fromTableFieldSchemaType(tableFieldSchema, tableFieldSchema.getFields(), options);
 
       Optional<Mode> fieldMode = Optional.ofNullable(tableFieldSchema.getMode()).map(Mode::valueOf);
       if (fieldMode.filter(m -> m == Mode.REPEATED).isPresent()
@@ -726,9 +742,18 @@ public class BigQueryUtils {
     // 1. TableSchema contains redundant information already available in the Schema object.
     // 2. TableSchema objects are not serializable and are therefore harder to propagate through a
     // pipeline.
-    return rowSchema.getFields().stream()
-        .map(field -> toBeamValue(field, jsonBqRow.get(field.getName())))
-        .collect(toRow(rowSchema));
+    try {
+      Row row =
+          rowSchema.getFields().stream()
+              .map(field -> toBeamValue(field, jsonBqRow.get(field.getName())))
+              .collect(toRow(rowSchema));
+      System.out.println("CLAUDE toBeamRow row: " + row + " rowSchema: " + row.getSchema());
+      // Thread.dumpStack();
+      return row;
+    } catch (Exception e) {
+      System.out.println("CLAUDE Exception: " + e);
+      throw e;
+    }
   }
 
   /**
@@ -758,7 +783,7 @@ public class BigQueryUtils {
 
   private static @Nullable Object toBeamValue(Field field, Object jsonBQValue) {
     FieldType fieldType = field.getType();
-
+    System.out.println("CLAUDE BigQueryUtils.toBeamValue field: " + field);
     if (jsonBQValue == null) {
       if (fieldType.getNullable()) {
         return null;
@@ -802,6 +827,22 @@ public class BigQueryUtils {
           return java.time.Instant.ofEpochSecond(seconds, nanos);
         } catch (NumberFormatException e) {
           return java.time.Instant.parse(jsonBQString);
+        }
+      } else if (fieldType.isLogicalType(Timestamp.IDENTIFIER)) {
+        System.out.println("CLAUDE fieldType.isLogicalType(Timestamp.IDENTIFIER) " + jsonBQString);
+        try {
+          if (jsonBQString.endsWith(" UTC")) {
+            java.time.format.DateTimeFormatter formatter =
+                java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSSSSS VV");
+
+            java.time.ZonedDateTime zdt = java.time.ZonedDateTime.parse(jsonBQString, formatter);
+            return zdt.toInstant();
+          }
+
+          return java.time.Instant.parse(jsonBQString);
+        } catch (Exception e) {
+          System.out.println("CLAUDE Exception: " + e);
+          throw e;
         }
       }
     }
