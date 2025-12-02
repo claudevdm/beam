@@ -94,6 +94,7 @@ public class AvroGenericRecordToStorageApiProto {
         return Optional.of(TableFieldSchema.Type.DATETIME);
       case "local-timestamp-millis":
         return Optional.of(TableFieldSchema.Type.DATETIME);
+      // TODO: Map timetamp-nanos type to proto message descriptor (like TableRowToStorageApiProto)
       case "uuid":
         return Optional.of(TableFieldSchema.Type.STRING);
       default:
@@ -125,6 +126,7 @@ public class AvroGenericRecordToStorageApiProto {
           .put("timestamp-millis", (logicalType, value) -> convertTimestamp(value, false))
           .put("local-timestamp-micros", (logicalType, value) -> convertDateTime(value, true))
           .put("local-timestamp-millis", (logicalType, value) -> convertDateTime(value, false))
+          // TODO: Map timestamp logical type to proto descriptor (like TableRowToStorageApiProto)
           .put("uuid", (logicalType, value) -> convertUUID(value))
           .build();
 

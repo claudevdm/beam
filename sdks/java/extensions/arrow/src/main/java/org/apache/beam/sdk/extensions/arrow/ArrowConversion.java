@@ -22,6 +22,7 @@ import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Pr
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.Channels;
+import java.time.Instant;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
@@ -45,6 +46,7 @@ import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.Field;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.logicaltypes.FixedBytes;
+import org.apache.beam.sdk.schemas.logicaltypes.Timestamp;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.joda.time.DateTime;
@@ -207,6 +209,8 @@ public class ArrowConversion {
                     if (type.getUnit() == TimeUnit.MILLISECOND
                         || type.getUnit() == TimeUnit.MICROSECOND) {
                       return FieldType.DATETIME;
+                    } else if (type.getUnit() == TimeUnit.NANOSECOND) {
+                      return FieldType.logicalType(Timestamp.NANOS);
                     } else {
                       throw new IllegalArgumentException(
                           "Unsupported timestamp unit: " + type.getUnit().name());
@@ -463,14 +467,36 @@ public class ArrowConversion {
           throw new IllegalArgumentException(
               "Encountered unrecognized Timezone: " + type.getTimezone());
         }
-        switch (type.getUnit()) {
-          case MICROSECOND:
-            return Optional.of((epochMicros) -> new DateTime((long) epochMicros / 1000, tz));
-          case MILLISECOND:
-            return Optional.of((epochMills) -> new DateTime((long) epochMills, tz));
-          default:
-            throw new AssertionError("Encountered unrecognized TimeUnit: " + type.getUnit());
-        }
+
+        return Optional.of(
+            new Function<Object, Object>() {
+              @Override
+              public Object apply(Object epoch) {
+                System.out.println(
+                    "CLAUDE ArrowValueConverterVisitor apply type "
+                        + type.toString()
+                        + " epoch "
+                        + epoch);
+                long divisor = 0L;
+                switch (type.getUnit()) {
+                  case MILLISECOND:
+                    divisor = 1L;
+                    break;
+                  case MICROSECOND:
+                    divisor = 1000L;
+                    break;
+                  case NANOSECOND:
+                    System.out.println(
+                        "CLAUDE ArrowValueConverterVisitor apply NANOSECOND "
+                            + Instant.ofEpochSecond(0L, (long) epoch));
+                    return Instant.ofEpochSecond(0L, (long) epoch);
+                  default:
+                    throw new AssertionError(
+                        "Encountered unrecognized TimeUnit: " + type.getUnit());
+                }
+                return new DateTime(Math.floorDiv((long) epoch, divisor), tz);
+              }
+            });
       }
 
       @Override

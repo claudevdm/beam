@@ -533,6 +533,9 @@ public class TableRowToStorageApiProto {
     if (field.getScale() != null) {
       builder.setScale(field.getScale());
     }
+    if (field.getTimestampPrecision() != null) {
+      builder.getTimestampPrecisionBuilder().setValue(field.getTimestampPrecision());
+    }
     builder.setType(typeToProtoType(field.getType()));
     if (builder.getType().equals(TableFieldSchema.Type.STRUCT)) {
       for (com.google.api.services.bigquery.model.TableFieldSchema subField : field.getFields()) {
@@ -583,6 +586,10 @@ public class TableRowToStorageApiProto {
       return tableFieldSchema.getMode().equals(TableFieldSchema.Mode.NULLABLE);
     }
 
+    public long getTimestampPrecision() {
+      return tableFieldSchema.getTimestampPrecision().getValue();
+    }
+
     public boolean isRepeated() {
       return tableFieldSchema.getMode().equals(TableFieldSchema.Mode.REPEATED);
     }
@@ -631,7 +638,6 @@ public class TableRowToStorageApiProto {
           .put(TableFieldSchema.Type.DATE, Type.TYPE_INT32)
           .put(TableFieldSchema.Type.TIME, Type.TYPE_INT64)
           .put(TableFieldSchema.Type.DATETIME, Type.TYPE_INT64)
-          .put(TableFieldSchema.Type.TIMESTAMP, Type.TYPE_INT64)
           .put(TableFieldSchema.Type.JSON, Type.TYPE_STRING)
           .build();
 
@@ -1060,6 +1066,34 @@ public class TableRowToStorageApiProto {
         fieldDescriptorBuilder =
             fieldDescriptorBuilder.setType(Type.TYPE_MESSAGE).setTypeName(nested.getName());
         break;
+      case TIMESTAMP:
+        System.out.println("CLAUDE case TIMESTAMP: ");
+        if (fieldSchema.getTimestampPrecision().getValue() == 12) {
+          DescriptorProto timestampPicosDescriptor =
+              DescriptorProto.newBuilder()
+                  .setName("TimestampPicos")
+                  .addField(
+                      DescriptorProtos.FieldDescriptorProto.newBuilder()
+                          .setName("seconds")
+                          .setNumber(1)
+                          .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
+                          .build())
+                  .addField(
+                      DescriptorProtos.FieldDescriptorProto.newBuilder()
+                          .setName("picoseconds")
+                          .setNumber(2)
+                          .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
+                          .build())
+                  .build();
+          descriptorBuilder.addNestedType(timestampPicosDescriptor);
+          fieldDescriptorBuilder =
+              fieldDescriptorBuilder
+                  .setType(Type.TYPE_MESSAGE)
+                  .setTypeName(timestampPicosDescriptor.getName());
+        } else {
+          fieldDescriptorBuilder = fieldDescriptorBuilder.setType(Type.TYPE_INT64);
+        }
+        break;
       default:
         @Nullable Type type = PRIMITIVE_TYPES_BQ_TO_PROTO.get(fieldSchema.getType());
         if (type == null) {
@@ -1313,6 +1347,43 @@ public class TableRowToStorageApiProto {
                 null,
                 null);
       }
+    } else if (schemaInformation.getType() == TableFieldSchema.Type.TIMESTAMP
+        && schemaInformation.getTimestampPrecision() == 12) {
+
+      Instant timestamp = null;
+      if (value instanceof String) {
+        try {
+          // '2011-12-03T10:15:30Z', '2011-12-03 10:15:30+05:00'
+          // '2011-12-03 10:15:30 UTC', '2011-12-03T10:15:30 America/New_York'
+          timestamp = Instant.from(TIMESTAMP_FORMATTER.parse((String) value));
+
+        } catch (DateTimeException e) {
+          try {
+            // for backwards compatibility, default time zone is UTC for values with
+            // no time-zone
+            // '2011-12-03T10:15:30'
+            timestamp =
+                Instant.from(TIMESTAMP_FORMATTER.withZone(ZoneOffset.UTC).parse((String) value));
+          } catch (DateTimeParseException err) {
+            // "12345667"
+            timestamp = Instant.ofEpochMilli(Long.parseLong((String) value));
+          }
+        }
+      } else if (value instanceof Instant) {
+        timestamp = (Instant) value;
+      }
+      if (timestamp == null) {
+        return null;
+      }
+      long seconds = timestamp.getEpochSecond();
+      int nanos = timestamp.getNano();
+      long picoseconds = nanos * 1000L;
+      converted =
+          DynamicMessage.newBuilder(fieldDescriptor.getMessageType())
+              .setField(fieldDescriptor.getMessageType().findFieldByName("seconds"), seconds)
+              .setField(
+                  fieldDescriptor.getMessageType().findFieldByName("picoseconds"), picoseconds)
+              .build();
     } else {
       @Nullable
       ThrowingBiFunction<String, Object, @Nullable Object> converter =

@@ -794,6 +794,7 @@ public class BigQueryIO {
         .setProjectionPushdownApplied(false)
         .setBadRecordErrorHandler(new DefaultErrorHandler<>())
         .setBadRecordRouter(BadRecordRouter.THROWING_ROUTER)
+        .setTimestampPrecision(TimestampPrecision.MICROS)
         .build();
   }
 
@@ -824,6 +825,7 @@ public class BigQueryIO {
         .setProjectionPushdownApplied(false)
         .setBadRecordErrorHandler(new DefaultErrorHandler<>())
         .setBadRecordRouter(BadRecordRouter.THROWING_ROUTER)
+        .setTimestampPrecision(TimestampPrecision.MICROS)
         .build();
   }
 
@@ -1251,6 +1253,8 @@ public class BigQueryIO {
       abstract Builder<T> setBadRecordRouter(BadRecordRouter badRecordRouter);
 
       abstract Builder<T> setProjectionPushdownApplied(boolean projectionPushdownApplied);
+
+      abstract Builder<T> setTimestampPrecision(TimestampPrecision precision);
     }
 
     abstract @Nullable ValueProvider<String> getJsonTableRef();
@@ -1305,6 +1309,8 @@ public class BigQueryIO {
     abstract BadRecordRouter getBadRecordRouter();
 
     abstract boolean getProjectionPushdownApplied();
+
+    abstract TimestampPrecision getTimestampPrecision();
 
     /**
      * An enumeration type for the priority of a query.
@@ -1381,7 +1387,8 @@ public class BigQueryIO {
           getFormat(),
           getParseFn(),
           outputCoder,
-          getBigQueryServices());
+          getBigQueryServices(),
+          getTimestampPrecision());
     }
 
     private static final String QUERY_VALIDATION_FAILURE_ERROR =
@@ -1694,6 +1701,8 @@ public class BigQueryIO {
         PBegin input, Coder<T> outputCoder, Schema beamSchema, BigQueryOptions bqOptions) {
       ValueProvider<TableReference> tableProvider = getTableProvider();
       Pipeline p = input.getPipeline();
+      System.out.println(
+          "CLAUDE expandForDirectRead getTimestampPrecision " + getTimestampPrecision());
       if (tableProvider != null) {
         // ThrowingBadRecordRouter is the default value, and is what is used if the user hasn't
         // specified any particular error handling.
@@ -1710,7 +1719,8 @@ public class BigQueryIO {
                           getParseFn(),
                           outputCoder,
                           getBigQueryServices(),
-                          getProjectionPushdownApplied())));
+                          getProjectionPushdownApplied(),
+                          getTimestampPrecision())));
           if (beamSchema != null) {
             rows.setSchema(
                 beamSchema,
@@ -1731,7 +1741,8 @@ public class BigQueryIO {
                   getParseFn(),
                   outputCoder,
                   getBigQueryServices(),
-                  getProjectionPushdownApplied());
+                  getProjectionPushdownApplied(),
+                  getTimestampPrecision());
           List<? extends BoundedSource<T>> sources;
           try {
             // This splitting logic taken from the SDF implementation of Read
@@ -2291,6 +2302,10 @@ public class BigQueryIO {
     /** See {@link Method}. */
     public TypedRead<T> withMethod(TypedRead.Method method) {
       return toBuilder().setMethod(method).build();
+    }
+
+    public TypedRead<T> withTimestampPrecision(TimestampPrecision timestampPrecision) {
+      return toBuilder().setTimestampPrecision(timestampPrecision).build();
     }
 
     /** See {@link DataFormat}. */

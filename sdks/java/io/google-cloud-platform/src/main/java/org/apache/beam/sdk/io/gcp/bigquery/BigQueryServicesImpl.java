@@ -1536,6 +1536,7 @@ public class BigQueryServicesImpl implements BigQueryServices {
               .setKeepAliveTimeout(org.threeten.bp.Duration.ofMinutes(1))
               .setKeepAliveWithoutCalls(true)
               .setChannelsPerCpu(2)
+              .setEndpoint("test-bigquerystorage-grpc.sandbox.googleapis.com:443")
               .build();
 
       String traceId =
@@ -1727,7 +1728,8 @@ public class BigQueryServicesImpl implements BigQueryServices {
             .setApplicationName(options.getAppName())
             .setGoogleClientRequestInitializer(options.getGoogleApiTrace());
 
-    @Nullable String endpoint = options.getBigQueryEndpoint();
+    // @Nullable String endpoint = options.getBigQueryEndpoint();
+    String endpoint = "https://test-bigquery.sandbox.google.com";
     if (!Strings.isNullOrEmpty(endpoint)) {
       builder.setRootUrl(endpoint);
     }
@@ -1742,13 +1744,16 @@ public class BigQueryServicesImpl implements BigQueryServices {
               .setKeepAliveTimeout(org.threeten.bp.Duration.ofMinutes(1))
               .setKeepAliveWithoutCalls(true)
               .setChannelsPerCpu(2)
+              .setEndpoint("test-bigquerystorage-grpc.sandbox.googleapis.com:443")
               .build();
 
       BigQueryWriteSettings.Builder builder = BigQueryWriteSettings.newBuilder();
-      @Nullable String endpoint = options.getBigQueryEndpoint();
-      if (!Strings.isNullOrEmpty(endpoint)) {
-        builder.setEndpoint(trimSchemaIfNecessary(endpoint));
-      }
+      // @Nullable String endpoint = options.getBigQueryEndpoint();
+      // if (!Strings.isNullOrEmpty(endpoint)) {
+      //   builder.setEndpoint(trimSchemaIfNecessary(endpoint));
+      // }
+      builder.setEndpoint("test-bigquerystorage-grpc.sandbox.googleapis.com:443");
+
       return BigQueryWriteClient.create(
           builder
               .setCredentialsProvider(() -> options.as(GcpOptions.class).getGcpCredential())
@@ -1869,7 +1874,8 @@ public class BigQueryServicesImpl implements BigQueryServices {
                       .setHeaderProvider(USER_AGENT_HEADER_PROVIDER)
                       .build())
               .setReadRowsRetryAttemptListener(listener);
-      @Nullable String endpoint = options.getBigQueryEndpoint();
+      String endpoint = "test-bigquerystorage-grpc.sandbox.googleapis.com:443";
+      // @Nullable String endpoint = options.getBigQueryEndpoint();
       if (!Strings.isNullOrEmpty(endpoint)) {
         settingsBuilder.setEndpoint(trimSchemaIfNecessary(endpoint));
       }

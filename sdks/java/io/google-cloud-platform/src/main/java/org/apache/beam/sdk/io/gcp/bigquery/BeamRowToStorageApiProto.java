@@ -141,6 +141,7 @@ public class BeamRowToStorageApiProto {
               EnumerationType.IDENTIFIER,
               (logicalType, value) ->
                   ((EnumerationType) logicalType).toString((EnumerationType.Value) value))
+                  // TODO: Convert timestamp logical type to proto message (like TableRowToStorageApiProto)
           .build();
 
   /**
@@ -243,6 +244,7 @@ public class BeamRowToStorageApiProto {
         if (logicalType == null) {
           throw new RuntimeException("Unexpected null logical type " + field.getType());
         }
+        // TODO: Map timestamp logical type to proto message descriptor (like TableRowToStorageApiProto)
         @Nullable TableFieldSchema.Type type = LOGICAL_TYPES.get(logicalType.getIdentifier());
         if (type == null) {
           throw new RuntimeException("Unsupported logical type " + field.getType());
