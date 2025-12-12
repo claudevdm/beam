@@ -191,6 +191,23 @@ public class TableRowToStorageApiProto {
           .put(TableFieldSchema.Type.JSON, "JSON")
           .build();
 
+  static final DescriptorProto TIMESTAMP_PICOS_DESCRIPTOR_PROTO =
+      DescriptorProto.newBuilder()
+          .setName("TimestampPicos")
+          .addField(
+              DescriptorProtos.FieldDescriptorProto.newBuilder()
+                  .setName("seconds")
+                  .setNumber(1)
+                  .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
+                  .build())
+          .addField(
+              DescriptorProtos.FieldDescriptorProto.newBuilder()
+                  .setName("picoseconds")
+                  .setNumber(2)
+                  .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
+                  .build())
+          .build();
+
   @FunctionalInterface
   public interface ThrowingBiFunction<FirstInputT, SecondInputT, OutputT> {
     OutputT apply(FirstInputT t, SecondInputT u) throws SchemaConversionException;
@@ -963,10 +980,16 @@ public class TableRowToStorageApiProto {
 
     switch (fieldDescriptor.getType()) {
       case MESSAGE:
-        tableFieldSchemaBuilder = tableFieldSchemaBuilder.setType(TableFieldSchema.Type.STRUCT);
-        TableSchema nestedTableField = tableSchemaFromDescriptor(fieldDescriptor.getMessageType());
-        tableFieldSchemaBuilder =
-            tableFieldSchemaBuilder.addAllFields(nestedTableField.getFieldsList());
+        if (fieldDescriptor.getMessageType().getName().equals("TimestampPicos")) {
+          tableFieldSchemaBuilder.setType(TableFieldSchema.Type.TIMESTAMP);
+          tableFieldSchemaBuilder.setPrecision(12);
+        } else {
+          tableFieldSchemaBuilder = tableFieldSchemaBuilder.setType(TableFieldSchema.Type.STRUCT);
+          TableSchema nestedTableField =
+              tableSchemaFromDescriptor(fieldDescriptor.getMessageType());
+          tableFieldSchemaBuilder =
+              tableFieldSchemaBuilder.addAllFields(nestedTableField.getFieldsList());
+        }
         break;
       default:
         TableFieldSchema.Type type = PRIMITIVE_TYPES_PROTO_TO_BQ.get(fieldDescriptor.getType());
@@ -1068,28 +1091,17 @@ public class TableRowToStorageApiProto {
         break;
       case TIMESTAMP:
         if (fieldSchema.getTimestampPrecision().getValue() == 12) {
-          // Build nested message descriptor for picosecond precision
-          DescriptorProto timestampPicosDescriptor =
-              DescriptorProto.newBuilder()
-                  .setName("TimestampPicos")
-                  .addField(
-                      DescriptorProtos.FieldDescriptorProto.newBuilder()
-                          .setName("seconds")
-                          .setNumber(1)
-                          .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
-                          .build())
-                  .addField(
-                      DescriptorProtos.FieldDescriptorProto.newBuilder()
-                          .setName("picoseconds")
-                          .setNumber(2)
-                          .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
-                          .build())
-                  .build();
-          descriptorBuilder.addNestedType(timestampPicosDescriptor);
+          boolean typeAlreadyExists =
+              descriptorBuilder.getNestedTypeList().stream()
+                  .anyMatch(d -> TIMESTAMP_PICOS_DESCRIPTOR_PROTO.getName().equals(d.getName()));
+
+          if (!typeAlreadyExists) {
+            descriptorBuilder.addNestedType(TIMESTAMP_PICOS_DESCRIPTOR_PROTO);
+          }
           fieldDescriptorBuilder =
               fieldDescriptorBuilder
                   .setType(Type.TYPE_MESSAGE)
-                  .setTypeName(timestampPicosDescriptor.getName());
+                  .setTypeName(TIMESTAMP_PICOS_DESCRIPTOR_PROTO.getName());
         } else {
           // Microsecond precision - use simple INT64
           fieldDescriptorBuilder = fieldDescriptorBuilder.setType(Type.TYPE_INT64);
@@ -1697,6 +1709,7 @@ public class TableRowToStorageApiProto {
           return LocalDateTime.ofInstant(instant, ZoneOffset.UTC).format(TIMESTAMP_FORMATTER);
         } else if (fieldDescriptor.getType().equals(FieldDescriptor.Type.MESSAGE)) {
           Message message = (Message) fieldValue;
+          String messageName = fieldDescriptor.getMessageType().getName();
           if (TIMESTAMP_VALUE_DESCRIPTOR_NAMES.contains(
               fieldDescriptor.getMessageType().getName())) {
             Descriptor descriptor = message.getDescriptorForType();
@@ -1704,6 +1717,20 @@ public class TableRowToStorageApiProto {
             int nanos = (int) message.getField(descriptor.findFieldByName("nanos"));
             Instant instant = Instant.ofEpochSecond(seconds, nanos);
             return LocalDateTime.ofInstant(instant, ZoneOffset.UTC).format(TIMESTAMP_FORMATTER);
+          } else if (messageName.equals("TimestampPicos")) {
+            Descriptor descriptor = message.getDescriptorForType();
+            long seconds = (long) message.getField(descriptor.findFieldByName("seconds"));
+            long picoseconds = (long) message.getField(descriptor.findFieldByName("picoseconds"));
+
+            // Convert to ISO timestamp string with picoseconds
+            Instant instant = Instant.ofEpochSecond(seconds);
+            String baseTimestamp = instant.toString(); // "2024-01-15T10:30:45Z"
+
+            // Format picoseconds as 12-digit string
+            String picosPart = String.format("%012d", picoseconds);
+
+            // Insert before 'Z': "2024-01-15T10:30:45Z" → "2024-01-15T10:30:45.123456789012Z"
+            return baseTimestamp.replace("Z", "." + picosPart + "Z");
           } else {
             throw new RuntimeException(
                 "Not implemented yet " + fieldDescriptor.getMessageType().getFullName());
