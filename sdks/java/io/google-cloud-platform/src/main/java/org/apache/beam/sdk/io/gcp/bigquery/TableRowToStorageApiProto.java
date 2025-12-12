@@ -533,6 +533,9 @@ public class TableRowToStorageApiProto {
     if (field.getScale() != null) {
       builder.setScale(field.getScale());
     }
+    if (field.getTimestampPrecision() != null) {
+      builder.getTimestampPrecisionBuilder().setValue(field.getTimestampPrecision());
+    }
     builder.setType(typeToProtoType(field.getType()));
     if (builder.getType().equals(TableFieldSchema.Type.STRUCT)) {
       for (com.google.api.services.bigquery.model.TableFieldSchema subField : field.getFields()) {
@@ -587,6 +590,10 @@ public class TableRowToStorageApiProto {
       return tableFieldSchema.getMode().equals(TableFieldSchema.Mode.REPEATED);
     }
 
+    public long getTimestampPrecision() {
+      return tableFieldSchema.getTimestampPrecision().getValue();
+    }
+
     public SchemaInformation getSchemaForField(String name) {
       SchemaInformation schemaInformation = subFieldsByName.get(name.toLowerCase());
       if (schemaInformation == null) {
@@ -631,7 +638,6 @@ public class TableRowToStorageApiProto {
           .put(TableFieldSchema.Type.DATE, Type.TYPE_INT32)
           .put(TableFieldSchema.Type.TIME, Type.TYPE_INT64)
           .put(TableFieldSchema.Type.DATETIME, Type.TYPE_INT64)
-          .put(TableFieldSchema.Type.TIMESTAMP, Type.TYPE_INT64)
           .put(TableFieldSchema.Type.JSON, Type.TYPE_STRING)
           .build();
 
@@ -1060,6 +1066,36 @@ public class TableRowToStorageApiProto {
         fieldDescriptorBuilder =
             fieldDescriptorBuilder.setType(Type.TYPE_MESSAGE).setTypeName(nested.getName());
         break;
+      case TIMESTAMP:
+        if (fieldSchema.getTimestampPrecision().getValue() == 12) {
+          // Build nested message descriptor for picosecond precision
+          DescriptorProto timestampPicosDescriptor =
+              DescriptorProto.newBuilder()
+                  .setName("TimestampPicos")
+                  .addField(
+                      DescriptorProtos.FieldDescriptorProto.newBuilder()
+                          .setName("seconds")
+                          .setNumber(1)
+                          .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
+                          .build())
+                  .addField(
+                      DescriptorProtos.FieldDescriptorProto.newBuilder()
+                          .setName("picoseconds")
+                          .setNumber(2)
+                          .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
+                          .build())
+                  .build();
+          descriptorBuilder.addNestedType(timestampPicosDescriptor);
+          fieldDescriptorBuilder =
+              fieldDescriptorBuilder
+                  .setType(Type.TYPE_MESSAGE)
+                  .setTypeName(timestampPicosDescriptor.getName());
+        } else {
+          // Microsecond precision - use simple INT64
+          fieldDescriptorBuilder = fieldDescriptorBuilder.setType(Type.TYPE_INT64);
+        }
+        break;
+
       default:
         @Nullable Type type = PRIMITIVE_TYPES_BQ_TO_PROTO.get(fieldSchema.getType());
         if (type == null) {
@@ -1313,6 +1349,34 @@ public class TableRowToStorageApiProto {
                 null,
                 null);
       }
+    } else if (schemaInformation.getType() == TableFieldSchema.Type.TIMESTAMP
+        && schemaInformation.getTimestampPrecision() == 12) {
+
+      long seconds;
+      long picoseconds;
+
+      if (value instanceof String) {
+        BigQueryUtils.TimestampPicos parsed =
+            BigQueryUtils.parseTimestampPicosFromString((String) value);
+        seconds = parsed.seconds;
+        picoseconds = parsed.picoseconds;
+
+      } else if (value instanceof Instant) {
+        Instant timestamp = (Instant) value;
+        seconds = timestamp.getEpochSecond();
+        picoseconds = timestamp.getNano() * 1000L;
+      } else {
+        throw new IllegalArgumentException(
+            "Unsupported timestamp value type: " + value.getClass().getName());
+      }
+
+      converted =
+          DynamicMessage.newBuilder(fieldDescriptor.getMessageType())
+              .setField(fieldDescriptor.getMessageType().findFieldByName("seconds"), seconds)
+              .setField(
+                  fieldDescriptor.getMessageType().findFieldByName("picoseconds"), picoseconds)
+              .build();
+
     } else {
       @Nullable
       ThrowingBiFunction<String, Object, @Nullable Object> converter =
