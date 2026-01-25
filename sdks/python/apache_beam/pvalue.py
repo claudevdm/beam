@@ -300,10 +300,14 @@ class DoOutputsTuple(object):
     if tag is not None:
       self._transform.output_tags.add(tag)
       is_bounded = all(i.is_bounded for i in self.producer.main_inputs.values())
+      # Look up the element type for this tag from the transform's type hints.
+      # Tagged output types can be specified via with_output_types(main, tag=type)
+      tagged_types = self._transform.get_type_hints().tagged_output_types()
+      element_type = tagged_types.get(tag, typehints.Any)
       pcoll = PCollection(
           self._pipeline,
           tag=tag,
-          element_type=typehints.Any,
+          element_type=element_type,
           is_bounded=is_bounded)
       # Transfer the producer from the DoOutputsTuple to the resulting
       # PCollection.

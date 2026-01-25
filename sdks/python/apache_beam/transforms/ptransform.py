@@ -414,12 +414,16 @@ class PTransform(WithTypeHints, HasDisplayData, Generic[InputT, OutputT]):
         input_type_hint, 'Type hints for a PTransform')
     return super().with_input_types(input_type_hint)
 
-  def with_output_types(self, type_hint):
+  def with_output_types(self, type_hint, **tagged_type_hints):
     """Annotates the output type of a :class:`PTransform` with a type-hint.
 
     Args:
       type_hint (type): An instance of an allowed built-in type, a custom class,
         or a :class:`~apache_beam.typehints.typehints.TypeConstraint`.
+        This is the type hint for the main output.
+      **tagged_type_hints: Type hints for tagged outputs. Each keyword argument
+        specifies the type for a tagged output, e.g., ``errors=str`` specifies
+        that the 'errors' tagged output contains strings.
 
     Raises:
       TypeError: If **type_hint** is not a valid type-hint. See
@@ -430,10 +434,26 @@ class PTransform(WithTypeHints, HasDisplayData, Generic[InputT, OutputT]):
       PTransform: A reference to the instance of this particular
       :class:`PTransform` object. This allows chaining type-hinting related
       methods.
+
+    Example::
+
+      result = pcoll | beam.ParDo(MyDoFn()).with_output_types(
+          int,  # main output type
+          errors=str,  # 'errors' tagged output type
+          warnings=str  # 'warnings' tagged output type
+      ).with_outputs('errors', 'warnings', main='main')
     """
     type_hint = native_type_compatibility.convert_to_beam_type(type_hint)
     validate_composite_type_param(type_hint, 'Type hints for a PTransform')
-    return super().with_output_types(type_hint)
+
+    # Convert and validate tagged type hints
+    for tag, hint in tagged_type_hints.items():
+      tagged_type_hints[tag] = native_type_compatibility.convert_to_beam_type(
+          hint)
+      validate_composite_type_param(
+          tagged_type_hints[tag], 'Tagged output type hint for %r' % tag)
+
+    return super().with_output_types(type_hint, **tagged_type_hints)
 
   def with_resource_hints(self, **kwargs):  # type: (...) -> PTransform
     """Adds resource hints to the :class:`PTransform`.
@@ -479,7 +499,11 @@ class PTransform(WithTypeHints, HasDisplayData, Generic[InputT, OutputT]):
     if hints is None or not any(hints):
       return
     arg_hints, kwarg_hints = hints
-    if arg_hints and kwarg_hints:
+    # For output types, kwargs can represent tagged output types (e.g.,
+    # with_output_types(int, errors=str)). In this case, we only validate
+    # the main output (positional arg) here; tagged outputs are validated
+    # when accessing the DoOutputsTuple.
+    if arg_hints and kwarg_hints and input_or_output != 'output':
       raise TypeCheckError(
           'PTransform cannot have both positional and keyword type hints '
           'without overriding %s._type_check_%s()' %

@@ -309,11 +309,28 @@ class IOTypeHints(NamedTuple):
   def simple_output_type(self, context):
     if self._has_output_types():
       args, kwargs = self.output_types
-      if len(args) != 1 or kwargs:
+      # Note: kwargs may contain tagged output types, which are ignored here.
+      # Use tagged_output_types() to access those.
+      if len(args) != 1:
         raise TypeError(
-            'Expected single output type hint for %s but got: %s' %
-            (context, self.output_types))
+            'Expected single main output type hint for %s but got: %s' %
+            (context, args))
       return args[0]
+
+  def tagged_output_types(self):
+    # type: () -> Dict[str, Any]
+    """Return tag->type mapping for tagged outputs.
+
+    Tagged output types are specified as keyword arguments to with_output_types:
+      @with_output_types(int, errors=str, warnings=str)
+
+    Returns:
+      A dict mapping tag names to their type hints, or empty dict if none.
+    """
+    if self._has_output_types():
+      _, kwargs = self.output_types
+      return kwargs
+    return {}
 
   def has_simple_output_type(self):
     """Whether there's a single positional output type."""
@@ -782,7 +799,7 @@ def with_input_types(*positional_hints: Any,
 
 
 def with_output_types(*return_type_hint: Any,
-                      **kwargs: Any) -> Callable[[T], T]:
+                      **tagged_type_hints: Any) -> Callable[[T], T]:
   """A decorator that type-checks defined type-hints for return values(s).
 
   This decorator will type-check the return value(s) of the decorated function.
@@ -822,18 +839,37 @@ def with_output_types(*return_type_hint: Any,
     def negate(p):
       return not p if p else p
 
+  For DoFns with tagged outputs, you can specify type hints for each tag:
+
+  .. testcode::
+
+    from apache_beam.typehints import with_input_types, with_output_types
+
+    @with_input_types(int)
+    @with_output_types(int, errors=str, warnings=str)
+    class MyDoFn(beam.DoFn):
+      def process(self, element):
+        if element < 0:
+          yield beam.pvalue.TaggedOutput('errors', 'Negative value')
+        elif element == 0:
+          yield beam.pvalue.TaggedOutput('warnings', 'Zero value')
+        else:
+          yield element
+
   Args:
     *return_type_hint: A type-hint specifying the proper return type of the
       function. This argument should either be a built-in Python type or an
       instance of a :class:`~apache_beam.typehints.typehints.TypeConstraint`
       created by 'indexing' a
       :class:`~apache_beam.typehints.typehints.CompositeTypeHint`.
-    **kwargs: Not used.
+    **tagged_type_hints: Type hints for tagged outputs. Each keyword argument
+      specifies the type for a tagged output, e.g., ``errors=str`` specifies
+      that the 'errors' tagged output contains strings.
 
   Raises:
-    :class:`ValueError`: If any kwarg parameters are passed in,
-      or the length of **return_type_hint** is greater than ``1``. Or if the
-      inner wrapper function isn't passed a function object.
+    :class:`ValueError`: If the length of **return_type_hint** is greater
+      than ``1``. Or if the inner wrapper function isn't passed a function
+      object.
     :class:`TypeCheckError`: If the **return_type_hint** object is
       in invalid type-hint.
 
@@ -841,11 +877,6 @@ def with_output_types(*return_type_hint: Any,
     The original function decorated such that it enforces type-hint constraints
     for all return values.
   """
-  if kwargs:
-    raise ValueError(
-        "All arguments for the 'returns' decorator must be "
-        "positional arguments.")
-
   if len(return_type_hint) != 1:
     raise ValueError(
         "'returns' accepts only a single positional argument. In "
@@ -858,9 +889,19 @@ def with_output_types(*return_type_hint: Any,
   validate_composite_type_param(
       return_type_hint, error_msg_prefix='All type hint arguments')
 
+  # Convert and validate tagged type hints
+  converted_tagged_hints = {}
+  for tag, hint in tagged_type_hints.items():
+    converted_hint = native_type_compatibility.convert_to_beam_type(hint)
+    validate_composite_type_param(
+        converted_hint,
+        error_msg_prefix='Tagged output type hint for %r' % tag)
+    converted_tagged_hints[tag] = converted_hint
+
   def annotate_output_types(f):
     th = getattr(f, '_type_hints', IOTypeHints.empty())
-    f._type_hints = th.with_output_types(return_type_hint)  # pylint: disable=protected-access
+    f._type_hints = th.with_output_types(  # pylint: disable=protected-access
+        return_type_hint, **converted_tagged_hints)
     return f
 
   return annotate_output_types

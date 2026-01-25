@@ -1670,6 +1670,8 @@ class ParDo(PTransformWithSideInputs):
           subject to change.
     """
     args, kwargs = self.raw_side_inputs
+    # Pass the ParDo's type hints so they can be used for the main output.
+    output_type_hint = self.get_type_hints().simple_output_type(self.label)
     return self.label >> _ExceptionHandlingWrapper(
         self.fn,
         args,
@@ -1685,7 +1687,8 @@ class ParDo(PTransformWithSideInputs):
         error_handler,
         on_failure_callback,
         allow_unsafe_userstate_in_process,
-        self.get_resource_hints())
+        self.get_resource_hints(),
+        output_type_hint)
 
   def with_error_handler(self, error_handler, **exception_handling_kwargs):
     """An alias for `with_exception_handling(error_handler=error_handler, ...)`
@@ -2292,7 +2295,8 @@ class _ExceptionHandlingWrapper(ptransform.PTransform):
       error_handler,
       on_failure_callback,
       allow_unsafe_userstate_in_process,
-      resource_hints):
+      resource_hints,
+      output_type_hint=None):
     if partial and use_subprocess:
       raise ValueError('partial and use_subprocess are mutually incompatible.')
     self._fn = fn
@@ -2310,6 +2314,7 @@ class _ExceptionHandlingWrapper(ptransform.PTransform):
     self._on_failure_callback = on_failure_callback
     self._allow_unsafe_userstate_in_process = allow_unsafe_userstate_in_process
     self._resource_hints = resource_hints
+    self._output_type_hint = output_type_hint
 
   def expand(self, pcoll):
     if self._allow_unsafe_userstate_in_process:
@@ -2341,11 +2346,24 @@ class _ExceptionHandlingWrapper(ptransform.PTransform):
     # This is the fix: propagate hints.
     pardo.get_resource_hints().update(self._resource_hints)
 
+    # Infer output types for both main and dead letter outputs.
+    # Use explicit type hint if provided, otherwise infer from DoFn.
+    if self._output_type_hint is not None:
+      main_output_type = self._output_type_hint
+    else:
+      main_output_type = self._fn.infer_output_type(pcoll.element_type)
+
+    # Dead letter format: Tuple[element, Tuple[exception_type, repr, traceback]]
+    dead_letter_type = typehints.Tuple[
+        pcoll.element_type,
+        typehints.Tuple[type, str, typehints.List[str]]]
+
+    # Use tagged output type hints to set types for both outputs.
+    tagged_type_hints = {self._dead_letter_tag: dead_letter_type}
+    pardo = pardo.with_output_types(main_output_type, **tagged_type_hints)
+
     result = pcoll | pardo.with_outputs(
         self._dead_letter_tag, main=self._main_tag, allow_unknown_tags=True)
-    #TODO(BEAM-18957): Fix when type inference supports tagged outputs.
-    result[self._main_tag].element_type = self._fn.infer_output_type(
-        pcoll.element_type)
 
     if self._threshold < 1.0:
 
