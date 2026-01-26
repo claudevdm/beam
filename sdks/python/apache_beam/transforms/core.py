@@ -2123,8 +2123,10 @@ def Map(fn, *args, **kwargs):  # pylint: disable=invalid-name
             wrapper)
   output_hint = type_hints.simple_output_type(label)
   if output_hint:
+    tagged_hints = type_hints.tagged_output_types()
     wrapper = with_output_types(
-        typehints.Iterable[_strip_output_annotations(output_hint)])(
+        typehints.Iterable[_strip_output_annotations(output_hint)],
+        **tagged_hints)(
             wrapper)
   # pylint: disable=protected-access
   wrapper._argspec_fn = fn
@@ -2192,8 +2194,10 @@ def MapTuple(fn, *args, **kwargs):  # pylint: disable=invalid-name
     pass
   output_hint = type_hints.simple_output_type(label)
   if output_hint:
+    tagged_hints = type_hints.tagged_output_types()
     wrapper = with_output_types(
-        typehints.Iterable[_strip_output_annotations(output_hint)])(
+        typehints.Iterable[_strip_output_annotations(output_hint)],
+        **tagged_hints)(
             wrapper)
 
   # Replace the first (args) component.
@@ -2264,7 +2268,9 @@ def FlatMapTuple(fn, *args, **kwargs):  # pylint: disable=invalid-name
     pass
   output_hint = type_hints.simple_output_type(label)
   if output_hint:
-    wrapper = with_output_types(_strip_output_annotations(output_hint))(wrapper)
+    tagged_hints = type_hints.tagged_output_types()
+    wrapper = with_output_types(
+        _strip_output_annotations(output_hint), **tagged_hints)(wrapper)
 
   # Replace the first (args) component.
   modified_arg_names = ['tuple_element'] + arg_names[-num_defaults:]

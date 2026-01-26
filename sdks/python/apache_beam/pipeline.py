@@ -997,7 +997,11 @@ class Pipeline(HasDisplayData):
       # TODO(https://github.com/apache/beam/issues/18957): Add support for
       #   tagged type hints.
       #   https://github.com/apache/beam/pull/9810#discussion_r338765251
+      logging.warning(f"CLAUDE result_pcollection {result_pcollection}")
+      logging.warning(f"CLAUDE result_pcollection {result_pcollection._transform}")
+      logging.warning(f"CLAUDE result_pcollection {result_pcollection._transform.get_type_hints()}")
       for pcoll in result_pcollection:
+        logging.warning(f"CLAUDE {pcoll}")
         if pcoll.element_type is None:
           pcoll.element_type = typehints.Any
 

@@ -231,7 +231,7 @@ class PDone(PValue):
   """
   pass
 
-
+import logging
 class DoOutputsTuple(object):
   """An object grouping the multiple outputs of a ParDo or FlatMap transform."""
   def __init__(
@@ -284,6 +284,7 @@ class DoOutputsTuple(object):
     # same ints that we used in the partition function.
     # TODO(gildea): Consider requiring string-based tags everywhere.
     # This will require a partition function that does not return ints.
+    logging.warning(f"CLAUDE {self} {tag}")
     if isinstance(tag, int):
       tag = str(tag)
     if tag == self._main_tag:
@@ -326,8 +327,10 @@ class DoOutputsTuple(object):
     self._pcolls[tag] = pcoll
     return pcoll
 
+TagType = TypeVar('TagType', bound=str)
+ValueType = TypeVar('ValueType')
 
-class TaggedOutput(object):
+class TaggedOutput(Generic[TagType, ValueType]):
   """An object representing a tagged value.
 
   ParDo, Map, and FlatMap transforms can emit values on multiple outputs which
@@ -335,7 +338,7 @@ class TaggedOutput(object):
   if it wants to emit on the main output and TaggedOutput objects
   if it wants to emit a value on a specific tagged output.
   """
-  def __init__(self, tag: str, value: Any) -> None:
+  def __init__(self, tag: TagType, value: ValueType) -> None:
     if not isinstance(tag, str):
       raise TypeError(
           'Attempting to create a TaggedOutput with non-string tag %s' %

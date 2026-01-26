@@ -94,7 +94,8 @@ from typing import Optional
 from typing import Tuple
 from typing import TypeVar
 from typing import Union
-
+from typing import get_args, get_origin
+from apache_beam.pvalue import TaggedOutput
 from apache_beam.typehints import native_type_compatibility
 from apache_beam.typehints import typehints
 from apache_beam.typehints.native_type_compatibility import convert_to_beam_type
@@ -181,6 +182,36 @@ def disable_type_annotations():
 
 TRACEBACK_LIMIT = 5
 
+
+
+def _extract_tagged_output_types(return_annotation):
+    """Parse return annotation to build tag→type mapping."""
+    tag_to_type = {}
+    main_type = None
+    
+    # Handle Union types (str | TaggedOutput[...] | TaggedOutput[...])
+    if get_origin(return_annotation) is Union:
+        members = get_args(return_annotation)
+    else:
+        members = [return_annotation]
+    
+    for member in members:
+        # Check if this is TaggedOutput[Literal["tag"], ValueType]
+        if get_origin(member) is TaggedOutput:
+            args = get_args(member)  # (Literal["errors"], int)
+            
+            literal_type = args[0]   # Literal["errors"]
+            value_type = args[1]     # int
+            
+            # Extract the actual string from Literal["errors"]
+            tag_string = get_args(literal_type)[0]  # "errors"
+            
+            tag_to_type[tag_string] = value_type
+        else:
+            # Non-TaggedOutput type is the main output
+            main_type = member
+    
+    return main_type, tag_to_type
 
 class IOTypeHints(NamedTuple):
   """Encapsulates all type hint information about a Beam construct.
@@ -274,8 +305,11 @@ class IOTypeHints(NamedTuple):
               'Unsupported Parameter kind: %s' % param.kind
           input_args.append(convert_to_beam_type(param.annotation))
     output_args = []
+    output_kwargs = {}
     if signature.return_annotation != signature.empty:
-      output_args.append(convert_to_beam_type(signature.return_annotation))
+      main_type, tagged_types = _extract_tagged_output_types(signature.return_annotation)
+      output_args.append(convert_to_beam_type(main_type))
+      output_kwargs = {tag: convert_to_beam_type(t) for tag, t in tagged_types.items()}
     else:
       output_args.append(typehints.Any)
 
@@ -287,7 +321,7 @@ class IOTypeHints(NamedTuple):
           (fn.__code__.co_filename, fn.__code__.co_firstlineno))
     return IOTypeHints(
         input_types=(tuple(input_args), input_kwargs),
-        output_types=(tuple(output_args), {}),
+        output_types=(tuple(output_args), output_kwargs),
         origin=cls._make_origin([], tb=False, msg=msg))
 
   def with_input_types(self, *args, **kwargs) -> 'IOTypeHints':
@@ -430,6 +464,8 @@ class IOTypeHints(NamedTuple):
     if self.output_types is None or not self.has_simple_output_type():
       return self
     output_type = self.output_types[0][0]
+    # Preserve tagged output types (kwargs) when stripping the main type.
+    tagged_output_types = self.output_types[1]
     if output_type is None or isinstance(output_type, type(None)):
       return self
     # If output_type == Optional[T]: output_type = T.
@@ -444,12 +480,12 @@ class IOTypeHints(NamedTuple):
     if isinstance(output_type, typehints.TypeVariable):
       # We don't know what T yields, so we just assume Any.
       return self._replace(
-          output_types=((typehints.Any, ), {}),
+          output_types=((typehints.Any, ), tagged_output_types),
           origin=self._make_origin([self], tb=False, msg=['strip_iterable()']))
 
     yielded_type = typehints.get_yielded_type(output_type)
     return self._replace(
-        output_types=((yielded_type, ), {}),
+        output_types=((yielded_type, ), tagged_output_types),
         origin=self._make_origin([self], tb=False, msg=['strip_iterable()']))
 
   def with_defaults(self, hints: Optional['IOTypeHints']) -> 'IOTypeHints':

@@ -1420,10 +1420,12 @@ class OutputDecoratorTestCase(TypeHintTestCase):
     def unused_foo():
       return 5, 'bar'
 
-  def test_no_kwargs_accepted(self):
-    with self.assertRaisesRegex(ValueError, r'must be positional'):
+  def test_requires_positional_main_type(self):
+    # Tagged output types (kwargs) are allowed, but a main output type
+    # (positional arg) is still required.
+    with self.assertRaisesRegex(ValueError, r'single positional argument'):
 
-      @with_output_types(m=int)
+      @with_output_types(errors=int)
       def unused_foo():
         return 5
 

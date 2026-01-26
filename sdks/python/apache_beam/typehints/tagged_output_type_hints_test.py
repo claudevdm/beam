@@ -195,6 +195,58 @@ class BackwardsCompatibilityTest(unittest.TestCase):
       self.assertEqual(result.element_type, int)
 
 
+class FlatMapDecoratorTaggedOutputTest(unittest.TestCase):
+  """Tests for FlatMap/Map with decorated functions that have tagged outputs."""
+
+  def test_flatmap_decorated_function_tagged_types(self):
+    """Test FlatMap with @with_output_types decorated function.
+
+    Note: For FlatMap, the output type should be Iterable[element_type] since
+    the function is a generator. strip_iterable() unwraps it to element_type.
+    """
+    from typing import Generator
+
+    @with_output_types(Generator[int, None, None], errors=str)
+    def process_with_errors(element):
+      if element < 0:
+        yield beam.pvalue.TaggedOutput('errors', f'Negative: {element}')
+      else:
+        yield element * 2
+
+    with beam.Pipeline() as p:
+      results = (
+          p
+          | beam.Create([-1, 0, 1, 2])
+          | beam.FlatMap(process_with_errors).with_outputs('errors', main='main'))
+
+      _ = results.main
+      errors = results.errors
+
+      # Verify tagged output type is preserved through FlatMap
+      self.assertEqual(errors.element_type, str)
+
+  def test_map_decorated_function_tagged_types(self):
+    """Test Map with @with_output_types decorated function."""
+
+    @with_output_types(int, errors=str)
+    def process_with_errors(element):
+      if element < 0:
+        return beam.pvalue.TaggedOutput('errors', f'Negative: {element}')
+      return element * 2
+
+    with beam.Pipeline() as p:
+      results = (
+          p
+          | beam.Create([-1, 0, 1, 2])
+          | beam.Map(process_with_errors).with_outputs('errors', main='main'))
+
+      _ = results.main
+      errors = results.errors
+
+      # Verify tagged output type is preserved through Map
+      self.assertEqual(errors.element_type, str)
+
+
 class ExceptionHandlingTaggedOutputTest(unittest.TestCase):
   """Tests for exception handling tagged output type hints."""
 
