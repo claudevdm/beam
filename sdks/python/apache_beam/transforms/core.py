@@ -1029,12 +1029,15 @@ class CallableWrapperDoFn(DoFn):
     return 'CallableWrapperDoFn(%s)' % self._fn
 
   def default_type_hints(self):
+    
     fn_type_hints = typehints.decorators.IOTypeHints.from_callable(self._fn)
     type_hints = get_type_hints(self._fn).with_defaults(fn_type_hints)
+    logging.warning(f"CLAUDE default_type_hints {self._fn} {fn_type_hints} {type_hints}")
     # The fn's output type should be iterable. Strip off the outer
     # container type due to the 'flatten' portion of FlatMap/ParDo.
     try:
       type_hints = type_hints.strip_iterable()
+      logging.warning(f"CLAUDE stripped {self._fn} {type_hints}")
     except ValueError as e:
       raise TypeCheckError(
           'Return value not iterable: %s: %s' %

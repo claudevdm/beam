@@ -187,7 +187,7 @@ TRACEBACK_LIMIT = 5
 def _extract_tagged_output_types(return_annotation):
     """Parse return annotation to build tag→type mapping."""
     tag_to_type = {}
-    main_type = None
+    main_types = []
     
     # Handle Union types (str | TaggedOutput[...] | TaggedOutput[...])
     if get_origin(return_annotation) is Union:
@@ -208,9 +208,15 @@ def _extract_tagged_output_types(return_annotation):
             
             tag_to_type[tag_string] = value_type
         else:
-            # Non-TaggedOutput type is the main output
-            main_type = member
-    
+            # Non-TaggedOutput type contributes to main output
+            main_types.append(member)
+
+    if len(main_types) == 0:
+        main_type = None
+    elif len(main_types) == 1:
+        main_type = main_types[0]
+    else:
+        main_type = Union[tuple(main_types)]
     return main_type, tag_to_type
 
 class IOTypeHints(NamedTuple):
@@ -369,8 +375,7 @@ class IOTypeHints(NamedTuple):
   def has_simple_output_type(self):
     """Whether there's a single positional output type."""
     return (
-        self.output_types and len(self.output_types[0]) == 1 and
-        not self.output_types[1])
+        self.output_types and len(self.output_types[0]) == 1)
 
   def strip_pcoll(self):
     from apache_beam.pipeline import Pipeline
