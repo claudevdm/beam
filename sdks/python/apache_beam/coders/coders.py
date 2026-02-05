@@ -934,8 +934,8 @@ class DeterministicFastPrimitivesCoderV2(FastCoder):
     self._version_tag = "v2_69"
 
     # Versions prior to 2.69.0 did not use relative filepaths.
-    from apache_beam.options.pipeline_construction_options import pipeline_construction_options
-    opts = pipeline_construction_options.options
+    from apache_beam.options.pipeline_construction_options import get_current_pipeline_options
+    opts = get_current_pipeline_options()
     if opts and opts.is_compat_version_prior_to("2.69.0"):
       self._version_tag = ""
       self._use_relative_filepaths = False
@@ -1006,18 +1006,9 @@ class DeterministicFastPrimitivesCoder(FastCoder):
 
 
 def _should_force_use_dill():
-  from apache_beam.options.pipeline_construction_options import pipeline_construction_options
+  from apache_beam.options.pipeline_construction_options import get_current_pipeline_options
 
-  # force_dill_deterministic_coders is for testing purposes. If there is a
-  # DeterministicFastPrimitivesCoder in the pipeline graph but the dill
-  # encoding path is not really triggered dill does not have to be installed
-  # and this check can be skipped.
-  if getattr(pipeline_construction_options,
-             'force_dill_deterministic_coders',
-             False):
-    return True
-
-  opts = pipeline_construction_options.options
+  opts = get_current_pipeline_options()
   if opts is None or not opts.is_compat_version_prior_to("2.68.0"):
     return False
 

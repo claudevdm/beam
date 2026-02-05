@@ -42,7 +42,7 @@ from apache_beam.coders import coders
 from apache_beam.coders import proto2_coder_test_messages_pb2 as test_message
 from apache_beam.coders import typecoders
 from apache_beam.internal import pickler
-from apache_beam.options.pipeline_construction_options import pipeline_construction_options
+from apache_beam.options.pipeline_construction_options import scoped_pipeline_options
 from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.runners import pipeline_context
 from apache_beam.transforms import userstate
@@ -204,9 +204,6 @@ class CodersTest(unittest.TestCase):
     assert not standard - cls.seen, str(standard - cls.seen)
     assert not cls.seen_nested - standard, str(cls.seen_nested - standard)
 
-  def tearDown(self):
-    pipeline_construction_options.options = None
-
   @classmethod
   def _observe(cls, coder):
     cls.seen.add(type(coder))
@@ -276,34 +273,33 @@ class CodersTest(unittest.TestCase):
     - In SDK version >=2.69.0 cloudpickle is used to encode "special types"
     with relative filepaths in code objects and dynamic functions.
     """
+    with scoped_pipeline_options(
+        PipelineOptions(update_compatibility_version=compat_version)):
+      coder = coders.FastPrimitivesCoder()
+      if not dill and compat_version == "2.67.0":
+        with self.assertRaises(RuntimeError):
+          coder.as_deterministic_coder(step_label="step")
+        self.skipTest('Dill not installed')
+      deterministic_coder = coder.as_deterministic_coder(step_label="step")
 
-    pipeline_construction_options.options = PipelineOptions(
-        update_compatibility_version=compat_version)
-    coder = coders.FastPrimitivesCoder()
-    if not dill and compat_version == "2.67.0":
-      with self.assertRaises(RuntimeError):
-        coder.as_deterministic_coder(step_label="step")
-      self.skipTest('Dill not installed')
-    deterministic_coder = coder.as_deterministic_coder(step_label="step")
+      self.check_coder(deterministic_coder, *self.test_values_deterministic)
+      for v in self.test_values_deterministic:
+        self.check_coder(coders.TupleCoder((deterministic_coder, )), (v, ))
+      self.check_coder(
+          coders.TupleCoder(
+              (deterministic_coder, ) * len(self.test_values_deterministic)),
+          tuple(self.test_values_deterministic))
 
-    self.check_coder(deterministic_coder, *self.test_values_deterministic)
-    for v in self.test_values_deterministic:
-      self.check_coder(coders.TupleCoder((deterministic_coder, )), (v, ))
-    self.check_coder(
-        coders.TupleCoder(
-            (deterministic_coder, ) * len(self.test_values_deterministic)),
-        tuple(self.test_values_deterministic))
+      self.check_coder(deterministic_coder, {})
+      self.check_coder(deterministic_coder, {2: 'x', 1: 'y'})
+      with self.assertRaises(TypeError):
+        self.check_coder(deterministic_coder, {1: 'x', 'y': 2})
+      self.check_coder(deterministic_coder, [1, {}])
+      with self.assertRaises(TypeError):
+        self.check_coder(deterministic_coder, [1, {1: 'x', 'y': 2}])
 
-    self.check_coder(deterministic_coder, {})
-    self.check_coder(deterministic_coder, {2: 'x', 1: 'y'})
-    with self.assertRaises(TypeError):
-      self.check_coder(deterministic_coder, {1: 'x', 'y': 2})
-    self.check_coder(deterministic_coder, [1, {}])
-    with self.assertRaises(TypeError):
-      self.check_coder(deterministic_coder, [1, {1: 'x', 'y': 2}])
-
-    self.check_coder(
-        coders.TupleCoder((deterministic_coder, coder)), (1, {}), ('a', [{}]))
+      self.check_coder(
+          coders.TupleCoder((deterministic_coder, coder)), (1, {}), ('a', [{}]))
 
     self.check_coder(deterministic_coder, test_message.MessageA(field1='value'))
 
@@ -367,29 +363,29 @@ class CodersTest(unittest.TestCase):
     - In SDK version >=2.69.0 cloudpickle is used to encode "special types"
     with relative file.
     """
-    pipeline_construction_options.options = PipelineOptions(
-        update_compatibility_version=compat_version)
-    values = [{
-        MyTypedNamedTuple(i, 'a'): MyTypedNamedTuple('a', i)
-        for i in range(10)
-    }]
+    with scoped_pipeline_options(
+        PipelineOptions(update_compatibility_version=compat_version)):
+      values = [{
+          MyTypedNamedTuple(i, 'a'): MyTypedNamedTuple('a', i)
+          for i in range(10)
+      }]
 
-    coder = coders.MapCoder(
-        coders.FastPrimitivesCoder(), coders.FastPrimitivesCoder())
+      coder = coders.MapCoder(
+          coders.FastPrimitivesCoder(), coders.FastPrimitivesCoder())
 
-    if not dill and compat_version == "2.67.0":
-      with self.assertRaises(RuntimeError):
-        coder.as_deterministic_coder(step_label="step")
-      self.skipTest('Dill not installed')
+      if not dill and compat_version == "2.67.0":
+        with self.assertRaises(RuntimeError):
+          coder.as_deterministic_coder(step_label="step")
+        self.skipTest('Dill not installed')
 
-    deterministic_coder = coder.as_deterministic_coder(step_label="step")
+      deterministic_coder = coder.as_deterministic_coder(step_label="step")
 
-    assert isinstance(
-        deterministic_coder._key_coder,
-        coders.DeterministicFastPrimitivesCoderV2 if compat_version
-        in (None, "2.68.0") else coders.DeterministicFastPrimitivesCoder)
+      assert isinstance(
+          deterministic_coder._key_coder,
+          coders.DeterministicFastPrimitivesCoderV2 if compat_version
+          in (None, "2.68.0") else coders.DeterministicFastPrimitivesCoder)
 
-    self.check_coder(deterministic_coder, *values)
+      self.check_coder(deterministic_coder, *values)
 
   def test_dill_coder(self):
     if not dill:
@@ -742,8 +738,6 @@ class CodersTest(unittest.TestCase):
 
     if sys.executable is None:
       self.skipTest('No Python interpreter found')
-    pipeline_construction_options.options = PipelineOptions(
-        update_compatibility_version=compat_version)
 
     # pylint: disable=line-too-long
     script = textwrap.dedent(
@@ -755,7 +749,7 @@ class CodersTest(unittest.TestCase):
         import logging
 
         from apache_beam.coders import coders
-        from apache_beam.options.pipeline_construction_options import pipeline_construction_options
+        from apache_beam.options.pipeline_construction_options import scoped_pipeline_options
         from apache_beam.options.pipeline_options import PipelineOptions
         from apache_beam.coders.coders_test_common import MyNamedTuple
         from apache_beam.coders.coders_test_common import MyTypedNamedTuple
@@ -778,7 +772,7 @@ class CodersTest(unittest.TestCase):
             stream=sys.stderr,
             force=True
         )
-        
+
         # Test cases for all special deterministic types
         # NOTE: When this script run in a subprocess the module is considered
         #  __main__. Dill cannot pickle enums in __main__ because it
@@ -799,7 +793,7 @@ class CodersTest(unittest.TestCase):
             ("getstate_setstate_list", [DefinesGetAndSetState(1), DefinesGetAndSetState((1, 2, 3))]),
         ]
 
-        
+
         test_cases.extend([
             ("frozen_dataclass", FrozenDataClass(1, 2)),
             ("frozen_dataclass_list", [FrozenDataClass(1, 2), FrozenDataClass(3, 4)]),
@@ -808,23 +802,23 @@ class CodersTest(unittest.TestCase):
         ])
 
         compat_version = {'"'+ compat_version +'"' if compat_version else None}
-        pipeline_construction_options.options = PipelineOptions(
-        update_compatibility_version=compat_version)
-        coder = coders.FastPrimitivesCoder()
-        deterministic_coder = coder.as_deterministic_coder("step")
-        
-        results = dict()
-        for test_name, value in test_cases:
-            try:
-                encoded = deterministic_coder.encode(value)
-                results[test_name] = encoded
-            except Exception as e:
-              logging.warning("Encoding failed with %s", e)
-              sys.exit(1)
-        
-        sys.stdout.buffer.write(pickle.dumps(results))
-                
-        
+        with scoped_pipeline_options(
+            PipelineOptions(update_compatibility_version=compat_version)):
+            coder = coders.FastPrimitivesCoder()
+            deterministic_coder = coder.as_deterministic_coder("step")
+
+            results = dict()
+            for test_name, value in test_cases:
+                try:
+                    encoded = deterministic_coder.encode(value)
+                    results[test_name] = encoded
+                except Exception as e:
+                  logging.warning("Encoding failed with %s", e)
+                  sys.exit(1)
+
+            sys.stdout.buffer.write(pickle.dumps(results))
+
+
     ''')
 
     def run_subprocess():
@@ -840,44 +834,48 @@ class CodersTest(unittest.TestCase):
     results1 = run_subprocess()
     results2 = run_subprocess()
 
-    coder = coders.FastPrimitivesCoder()
-    deterministic_coder = coder.as_deterministic_coder("step")
+    with scoped_pipeline_options(
+        PipelineOptions(update_compatibility_version=compat_version)):
+      coder = coders.FastPrimitivesCoder()
+      deterministic_coder = coder.as_deterministic_coder("step")
 
-    for test_name in results1:
+      for test_name in results1:
 
-      data1 = results1[test_name]
-      data2 = results2[test_name]
+        data1 = results1[test_name]
+        data2 = results2[test_name]
 
-      self.assertEqual(
-          data1, data2, f"Cross-process encoding differs for {test_name}")
-      self.assertGreater(len(data1), 1)
-
-      try:
-        decoded1 = deterministic_coder.decode(data1)
-        decoded2 = deterministic_coder.decode(data2)
-      except Exception as e:
-        logging.warning("Could not decode %s data due to %s", test_name, e)
-        continue
-
-      if test_name == "named_tuple_simple" and not is_using_dill:
-        # The absense of a compat_version means we are using the most recent
-        # implementation of the coder, which uses relative paths.
-        should_have_relative_path = not compat_version
-        named_tuple_type = type(decoded1)
         self.assertEqual(
-            os.path.isabs(named_tuple_type._make.__code__.co_filename),
-            not should_have_relative_path)
-        self.assertEqual(
-            os.path.isabs(
-                named_tuple_type.__getnewargs__.__globals__['__file__']),
-            not should_have_relative_path)
+            data1, data2, f"Cross-process encoding differs for {test_name}")
+        self.assertGreater(len(data1), 1)
 
-      self.assertEqual(
-          decoded1, decoded2, f"Cross-process decoding differs for {test_name}")
-      self.assertIsInstance(
-          decoded1,
-          type(decoded2),
-          f"Cross-process decoding differs for {test_name}")
+        try:
+          decoded1 = deterministic_coder.decode(data1)
+          decoded2 = deterministic_coder.decode(data2)
+        except Exception as e:
+          logging.warning("Could not decode %s data due to %s", test_name, e)
+          continue
+
+        if test_name == "named_tuple_simple" and not is_using_dill:
+          # The absense of a compat_version means we are using the most recent
+          # implementation of the coder, which uses relative paths.
+          should_have_relative_path = not compat_version
+          named_tuple_type = type(decoded1)
+          self.assertEqual(
+              os.path.isabs(named_tuple_type._make.__code__.co_filename),
+              not should_have_relative_path)
+          self.assertEqual(
+              os.path.isabs(
+                  named_tuple_type.__getnewargs__.__globals__['__file__']),
+              not should_have_relative_path)
+
+        self.assertEqual(
+            decoded1,
+            decoded2,
+            f"Cross-process decoding differs for {test_name}")
+        self.assertIsInstance(
+            decoded1,
+            type(decoded2),
+            f"Cross-process decoding differs for {test_name}")
 
   def test_proto_coder(self):
     # For instructions on how these test proto message were generated,

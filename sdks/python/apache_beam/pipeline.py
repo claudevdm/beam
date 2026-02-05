@@ -74,7 +74,7 @@ from apache_beam import pvalue
 from apache_beam.coders import typecoders
 from apache_beam.internal import pickler
 from apache_beam.io.filesystems import FileSystems
-from apache_beam.options.pipeline_construction_options import pipeline_construction_options
+from apache_beam.options.pipeline_construction_options import scoped_pipeline_options
 from apache_beam.options.pipeline_options import CrossLanguageOptions
 from apache_beam.options.pipeline_options import DebugOptions
 from apache_beam.options.pipeline_options import PipelineOptions
@@ -225,8 +225,6 @@ class Pipeline(HasDisplayData):
     if errors:
       raise ValueError(
           'Pipeline has validations errors: \n' + '\n'.join(errors))
-
-    pipeline_construction_options.options = self._options
 
     # set default experiments for portable runners
     # (needs to occur prior to pipeline construction)
@@ -558,6 +556,12 @@ class Pipeline(HasDisplayData):
 
   def run(self, test_runner_api: Union[bool, str] = 'AUTO') -> 'PipelineResult':
     """Runs the pipeline. Returns whatever our runner returns after running."""
+    with scoped_pipeline_options(self._options):
+      return self._run_internal(test_runner_api)
+
+  def _run_internal(
+      self, test_runner_api: Union[bool, str] = 'AUTO') -> 'PipelineResult':
+    """Internal implementation of run(), called within scoped options."""
     # All pipeline options are finalized at this point.
     # Call get_all_options to print warnings on invalid options.
     self.options.get_all_options(
@@ -697,6 +701,15 @@ class Pipeline(HasDisplayData):
       RuntimeError: if the transform object was already applied to
         this pipeline and needs to be cloned in order to apply again.
     """
+    with scoped_pipeline_options(self._options):
+      return self._apply_internal(transform, pvalueish, label)
+
+  def _apply_internal(
+      self,
+      transform: ptransform.PTransform,
+      pvalueish: Optional[pvalue.PValue] = None,
+      label: Optional[str] = None) -> pvalue.PValue:
+    """Internal implementation of apply(), called within scoped options."""
     if isinstance(transform, ptransform._NamedPTransform):
       return self.apply(
           transform.transform, pvalueish, label or transform.label)
@@ -1045,6 +1058,19 @@ class Pipeline(HasDisplayData):
       default_environment: Optional['environments.Environment'] = None
   ) -> beam_runner_api_pb2.Pipeline:
     """For internal use only; no backwards-compatibility guarantees."""
+    with scoped_pipeline_options(self._options):
+      return self._to_runner_api_internal(
+          return_context, context, use_fake_coders, default_environment)
+
+  def _to_runner_api_internal(
+      self,
+      return_context: bool = False,
+      context: Optional['PipelineContext'] = None,
+      use_fake_coders: bool = False,
+      default_environment: Optional['environments.Environment'] = None
+  ) -> beam_runner_api_pb2.Pipeline:
+    """Internal implementation of to_runner_api(), called within scoped 
+    options."""
     from apache_beam.runners import pipeline_context
     if context is None:
       context = pipeline_context.PipelineContext(

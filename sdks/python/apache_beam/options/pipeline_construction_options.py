@@ -15,23 +15,63 @@
 # limitations under the License.
 #
 
-"""Singleton providing access to pipeline options during graph construction.
+"""Context-scoped access to pipeline options during graph construction.
 
-This module provides a lightweight singleton that holds the full
-PipelineOptions set during Pipeline.__init__.
+This module provides thread-safe and async-safe access to PipelineOptions
+using Python's contextvars. This ensures that concurrent pipeline operations
+(whether via threading or asyncio) each see their own pipeline's options.
+
+Usage:
+    # Reading options (from anywhere in the call stack):
+    from apache_beam.options.pipeline_construction_options import get_current_pipeline_options
+    options = get_current_pipeline_options()
+
+    # Setting options (typically done internally by Pipeline):
+    from apache_beam.options.pipeline_construction_options import scoped_pipeline_options
+    with scoped_pipeline_options(options):
+        # All code here sees these options
+        ...
 """
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import TYPE_CHECKING
 from typing import Optional
 
-from apache_beam.options.pipeline_options import PipelineOptions
+if TYPE_CHECKING:
+  from apache_beam.options.pipeline_options import PipelineOptions
+
+# The contextvar holding the current pipeline's options.
+# Each thread and each asyncio task gets its own isolated copy.
+_current_pipeline_options: ContextVar[Optional['PipelineOptions']] = ContextVar(
+    'current_pipeline_options', default=None)
 
 
-class PipelineConstructionOptions:
-  """Holds the current pipeline's options during graph construction.
+def get_current_pipeline_options() -> Optional['PipelineOptions']:
+  """Get the current pipeline's options from the context.
 
-  Set during Pipeline.__init__.
+  Returns:
+    The PipelineOptions for the currently executing pipeline operation,
+    or None if called outside of a pipeline context.
   """
-  options: Optional[PipelineOptions] = None
+  return _current_pipeline_options.get()
 
 
-pipeline_construction_options = PipelineConstructionOptions()
+@contextmanager
+def scoped_pipeline_options(options: Optional['PipelineOptions']):
+  """Context manager that sets pipeline options for the duration of a block.
+
+  This properly handles nesting - if you have nested pipeline operations,
+  each level will restore the previous options when it exits.
+
+  Args:
+    options: The PipelineOptions to make available during this scope.
+
+  Yields:
+    None
+  """
+  token = _current_pipeline_options.set(options)
+  try:
+    yield
+  finally:
+    _current_pipeline_options.reset(token)
