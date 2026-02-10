@@ -104,6 +104,23 @@ class VertexAITextEmbeddings(EmbeddingsManager):
         inference_args=self.inference_args).with_output_types(Chunk)
 
 
+def _extract_images(items: Sequence[EmbeddableItem]) -> list:
+  """Extract images from items and convert to vertexai Image objects."""
+  images = []
+  for item in items:
+    if not item.content.image:
+      raise ValueError(
+          "Expected image content in "
+          f"{type(item).__name__} {item.id}, "
+          "got None")
+    img_data = item.content.image
+    if isinstance(img_data, bytes):
+      images.append(Image(image_bytes=img_data))
+    else:
+      images.append(Image.load_from_file(img_data))
+  return images
+
+
 def _create_image_adapter(
 ) -> EmbeddingTypeAdapter[EmbeddableItem, EmbeddableItem]:
   """Creates adapter for Vertex AI image embedding.
@@ -115,21 +132,6 @@ def _create_image_adapter(
   Returns:
       EmbeddingTypeAdapter for Vertex AI image embedding.
   """
-  def _extract_images(items: Sequence[EmbeddableItem]) -> list:
-    images = []
-    for item in items:
-      if not item.content.image:
-        raise ValueError(
-            "Expected image content in "
-            f"{type(item).__name__} {item.id}, "
-            "got None")
-      img_data = item.content.image
-      if isinstance(img_data, bytes):
-        images.append(Image(image_bytes=img_data))
-      else:
-        images.append(Image.load_from_file(img_data))
-    return images
-
   return EmbeddingTypeAdapter(
       input_fn=_extract_images, output_fn=_add_embedding_fn)
 
