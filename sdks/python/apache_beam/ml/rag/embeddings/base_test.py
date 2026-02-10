@@ -110,5 +110,28 @@ class ImageEmbeddableItemTest(unittest.TestCase):
     self.assertEqual(item.content.image, 'path/to/img.jpg')
 
 
+class ContentStringTest(unittest.TestCase):
+  def test_text_content(self):
+    item = EmbeddableItem(content=Content(text="hello"), id="1")
+    self.assertEqual(item.content_string, "hello")
+
+  def test_image_uri_content(self):
+    item = EmbeddableItem.from_image('gs://bucket/img.jpg', id='img1')
+    self.assertEqual(item.content_string, 'gs://bucket/img.jpg')
+
+  def test_image_bytes_returns_none(self):
+    item = EmbeddableItem.from_image(b'\x89PNG\r\n', id='img2')
+    self.assertIsNone(item.content_string)
+
+  def test_empty_content_returns_none(self):
+    item = EmbeddableItem(content=Content(), id="1")
+    self.assertIsNone(item.content_string)
+
+  def test_text_takes_priority_over_image(self):
+    item = EmbeddableItem(
+        content=Content(text="caption", image='gs://bucket/img.jpg'), id="1")
+    self.assertEqual(item.content_string, "caption")
+
+
 if __name__ == '__main__':
   unittest.main()

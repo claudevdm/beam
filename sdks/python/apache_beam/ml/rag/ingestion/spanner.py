@@ -265,10 +265,8 @@ class SpannerColumnSpecsBuilder:
         ...     convert_fn=lambda text: text[:1000]
         ... )
     """
-    def extract_fn(chunk: EmbeddableItem) -> str:
-      if chunk.content.text is None:
-        raise ValueError(f'EmbeddableItem must contain content: {chunk}')
-      return chunk.content.text
+    def extract_fn(chunk: EmbeddableItem) -> Any:
+      return chunk.content_string
 
     self._specs.append(
         SpannerColumnSpec(

@@ -129,7 +129,7 @@ def _default_embeddable_to_dict_fn(chunk: EmbeddableItem):
   return {
       'id': chunk.id,
       'embedding': chunk.embedding.dense_embedding,
-      'content': chunk.content.text,
+      'content': chunk.content_string,
       'metadata': [{
           "key": k, "value": str(v)
       } for k, v in chunk.metadata.items()]

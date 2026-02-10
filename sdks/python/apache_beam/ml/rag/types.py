@@ -147,6 +147,20 @@ class EmbeddableItem:
     )
 
   @property
+  def content_string(self) -> Optional[str]:
+    """Returns storable string content for ingestion.
+
+    Falls back through content fields in priority order:
+    text > image URI. Returns None for raw image bytes
+    (which cannot be stored in a text column).
+    """
+    if self.content.text is not None:
+      return self.content.text
+    if isinstance(self.content.image, str):
+      return self.content.image
+    return None
+
+  @property
   def dense_embedding(self) -> Optional[List[float]]:
     return self.embedding.dense_embedding if self.embedding else None
 

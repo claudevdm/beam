@@ -233,10 +233,8 @@ class ColumnSpecsBuilder:
           ... )
       """
     def value_fn(chunk: EmbeddableItem) -> Any:
-      if chunk.content.text is None:
-        raise ValueError(f'Expected chunk to contain content. {chunk}')
-      value = chunk.content.text
-      return convert_fn(value) if convert_fn else value
+      value = chunk.content_string
+      return convert_fn(value) if convert_fn and value is not None else value
 
     self._specs.append(
         ColumnSpec(
