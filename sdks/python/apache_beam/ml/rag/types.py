@@ -36,6 +36,7 @@ from typing import Dict
 from typing import List
 from typing import Optional
 from typing import Tuple
+from typing import Union
 
 
 @dataclass
@@ -44,8 +45,11 @@ class Content:
 
   Args:
       text: Text content to be embedded.
+      image: Image as bytes or path/URI
+          (e.g., 'gs://bucket/img.jpg').
   """
   text: Optional[str] = None
+  image: Optional[Union[bytes, str]] = None
 
 
 @dataclass
@@ -75,8 +79,13 @@ class EmbeddableItem:
           item = EmbeddableItem.from_text(
               "hello world", metadata={'src': 'doc'})
 
+      Image (via factory):
+          item = EmbeddableItem.from_image(
+              'gs://bucket/img.jpg')
+
       Text (direct, equivalent to old Chunk usage):
-          item = EmbeddableItem(content=Content(text="hello"), index=3)
+          item = EmbeddableItem(
+              content=Content(text="hello"), index=3)
 
   Args:
       content: The content to embed.
@@ -112,6 +121,28 @@ class EmbeddableItem:
         content=Content(text=text),
         id=id or str(uuid.uuid4()),
         index=index,
+        metadata=metadata or {},
+    )
+
+  @classmethod
+  def from_image(
+      cls,
+      image: Union[bytes, str],
+      *,
+      id: Optional[str] = None,
+      metadata: Optional[Dict[str, Any]] = None,
+  ) -> 'EmbeddableItem':
+    """Create an EmbeddableItem with image content.
+
+    Args:
+        image: Image bytes or path/URI (e.g. GCS path)
+        id: Unique identifier (auto-generated if not
+            provided)
+        metadata: Additional metadata
+    """
+    return cls(
+        content=Content(image=image),
+        id=id or str(uuid.uuid4()),
         metadata=metadata or {},
     )
 
