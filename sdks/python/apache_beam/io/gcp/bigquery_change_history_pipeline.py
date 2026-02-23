@@ -100,12 +100,12 @@ def main():
   parser.add_argument(
       '--max_streams',
       type=int,
-      default=10,
-      help='Max Storage Read API streams per read')
+      default=0,
+      help='Max Storage Read API streams per read (0 = server decides)')
   # Runner and Dataflow-specific args
   parser.add_argument(
       '--runner',
-      default='DirectRunner',
+      default='PrismRunner',
       help='Pipeline runner (DirectRunner or DataflowRunner)')
   parser.add_argument('--region', default='us-central1', help='Dataflow region')
   parser.add_argument(
@@ -175,7 +175,8 @@ def main():
             buffer_sec=args.buffer_sec,
             max_streams=args.max_streams,
             project=args.project,
-            temp_dataset=args.temp_dataset))
+            temp_dataset=args.temp_dataset,
+            trace=True))
 
     # Log every row
     _ = rows | 'LogRows' >> beam.ParDo(LogRow())
