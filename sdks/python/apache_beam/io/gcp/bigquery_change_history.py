@@ -71,6 +71,15 @@ _LOGGER = logging.getLogger(__name__)
 
 __all__ = ['ReadBigQueryChangeHistory']
 
+# Module-level session cache shared across all deserialized copies of the SDF.
+# The SDF runner decomposes an SDF into separate wrapper DoFns
+# (PairWithRestriction, SplitAndSizeRestrictions, ProcessSizedElements), each
+# being a separately deserialized copy.  initial_restriction() runs on one copy,
+# process() on another.  A module-level dict is visible to all copies in the
+# same worker process, bridging that gap.
+# Key: table_key string, Value: (ReadSession, total_streams)
+_session_cache = {}
+
 # Max time range for CHANGES() queries: 1 day in seconds.
 _MAX_CHANGES_RANGE_SEC = 86400
 
@@ -385,36 +394,16 @@ class _PollChangeHistoryFn(beam.DoFn):
 # =============================================================================
 
 
-class _ReadStorageStreamsRestrictionProvider(
-    beam.transforms.core.RestrictionProvider):
-  """RestrictionProvider for the Storage Read SDF.
-
-  Returns an OffsetRange(0, 1) placeholder restriction. The actual stream
-  count is discovered at process() time when the ReadSession is created.
-  The runner can dynamically split the restriction to distribute streams
-  across workers.
-  """
-  def initial_restriction(self, element):
-    return OffsetRange(0, 1)
-
-  def create_tracker(self, restriction):
-    return OffsetRestrictionTracker(restriction)
-
-  def restriction_size(self, element, restriction):
-    return restriction.stop - restriction.start
-
-  def split(self, element, restriction):
-    yield restriction
-
-  def is_bounded(self):
-    return True
-
-
-class _ReadStorageStreamsSDF(beam.DoFn):
+class _ReadStorageStreamsSDF(beam.DoFn,
+                             beam.transforms.core.RestrictionProvider):
   """SDF that reads a temp table via BigQuery Storage Read API.
 
-  Each element is a _QueryResult pointing to a temp table. The DoFn creates
-  a ReadSession to discover streams, then reads each stream yielding rows.
+  The DoFn is its own RestrictionProvider (see core.py:220-222). This allows
+  initial_restriction() to access self._storage_client (from setup()) to
+  create a ReadSession and discover the actual stream count. The runner then
+  sees the true restriction size and can split across workers.
+
+  Each element is a _QueryResult pointing to a temp table.
 
   Emits:
     Main output: TimestampedValue(row_dict, change_timestamp)
@@ -424,62 +413,111 @@ class _ReadStorageStreamsSDF(beam.DoFn):
     self._max_streams = max_streams
     self._trace = trace
     self._storage_client = None
-    # Cache: table_key -> (session, total_streams)
-    self._session_cache = {}
 
   def _log(self, msg, *args):
     if self._trace:
       _LOGGER.warning(msg, *args)
 
-  def setup(self):
-    if bq_storage is None:
-      raise ImportError(
-          'google-cloud-bigquery-storage is required for '
-          'ReadBigQueryChangeHistory. Install it with: '
-          'pip install google-cloud-bigquery-storage')
-    self._log('[Stage2-SDF] setup: creating BigQueryReadClient')
-    self._storage_client = bq_storage.BigQueryReadClient()
+  def _ensure_client(self):
+    """Lazily initialize the Storage client.
 
-  def process(
-      self,
-      element,
-      restriction_tracker=beam.DoFn.RestrictionParam(
-          _ReadStorageStreamsRestrictionProvider())):
+    Called from both setup() and initial_restriction() because the runner
+    may invoke initial_restriction on the RestrictionProvider instance
+    before setup() runs (or on a separately deserialized copy).
+    """
+    if self._storage_client is None:
+      if bq_storage is None:
+        raise ImportError(
+            'google-cloud-bigquery-storage is required for '
+            'ReadBigQueryChangeHistory. Install it with: '
+            'pip install google-cloud-bigquery-storage')
+      self._log('[Stage2-SDF] creating BigQueryReadClient')
+      self._storage_client = bq_storage.BigQueryReadClient()
+
+  def setup(self):
+    self._ensure_client()
+
+  # --- RestrictionProvider methods ---
+
+  def initial_restriction(self, element):
+    """Create ReadSession and return OffsetRange(0, num_streams)."""
     table_key = _table_key(element.temp_table_ref)
 
-    if table_key in self._session_cache:
-      session, total_streams = self._session_cache[table_key]
+    # Reuse cached session if available (e.g. bundle retry for same element).
+    cached = _session_cache.get(table_key)
+    if cached is not None:
+      session, total_streams = cached
       self._log(
-          '[Stage2-SDF] Using cached ReadSession for %s: %d streams',
+          '[Stage2-SDF] initial_restriction for %s: reusing cached session '
+          '(%d streams)',
           table_key,
           total_streams)
+      return OffsetRange(0, total_streams)
+
+    self._ensure_client()
+    session = self._create_read_session(element.temp_table_ref)
+    total_streams = len(session.streams)
+    _session_cache[table_key] = (session, total_streams)
+    self._log(
+        '[Stage2-SDF] initial_restriction for %s: %d streams',
+        table_key,
+        total_streams)
+    return OffsetRange(0, total_streams)
+
+  def create_tracker(self, restriction):
+    return OffsetRestrictionTracker(restriction)
+
+  def restriction_size(self, element, restriction):
+    return restriction.stop - restriction.start
+
+  def split(self, element, restriction):
+    """Yield one OffsetRange per stream so runner distributes them."""
+    if restriction.stop - restriction.start <= 1:
+      yield restriction
     else:
-      self._log(
-          '[Stage2-SDF] Creating ReadSession for %s '
-          '(max_streams=%d)...',
-          table_key,
-          self._max_streams)
+      for i in range(restriction.start, restriction.stop):
+        yield OffsetRange(i, i + 1)
+
+  def is_bounded(self):
+    return True
+
+  # --- Process ---
+
+  def process(self, element, restriction_tracker=beam.DoFn.RestrictionParam()):
+    self._ensure_client()
+    table_key = _table_key(element.temp_table_ref)
+
+    # Session was created in initial_restriction and stored in module cache.
+    # Multiple splits share the same table_key, so we must NOT pop/evict here —
+    # all splits need the same session to index into the same stream list.
+    cached = _session_cache.get(table_key)
+    if cached is not None:
+      session, total_streams = cached
+    else:
+      # Cache miss should not happen in normal operation (initial_restriction
+      # always runs before process in the same worker process).  Log loudly
+      # and re-create — but this means stream indices from split() may not
+      # align with the new session's streams, so this is best-effort only.
+      _LOGGER.warning(
+          '[Stage2-SDF] UNEXPECTED cache miss for %s — re-creating '
+          'ReadSession. Stream indices may be stale.',
+          table_key)
       session = self._create_read_session(element.temp_table_ref)
       total_streams = len(session.streams)
-      self._session_cache[table_key] = (session, total_streams)
-      self._log(
-          '[Stage2-SDF] ReadSession created for %s: %d streams',
-          table_key,
-          total_streams)
+      _session_cache[table_key] = (session, total_streams)
 
     streams_read = 0
     total_rows = 0
 
     if total_streams == 0:
       # Empty table — nothing to read. Emit cleanup signal to delete
-      # the temp table. No need to claim any offset.
+      # the temp table.
       self._log(
           '[Stage2-SDF] Empty table %s (0 streams), emitting cleanup',
           table_key)
     else:
       # Read streams according to restriction
       restriction = restriction_tracker.current_restriction()
-      # Clamp to actual stream count
       stream_end = min(restriction.stop, total_streams)
       self._log(
           '[Stage2-SDF] Reading streams [%d, %d) of %d total for %s',
@@ -541,7 +579,11 @@ class _ReadStorageStreamsSDF(beam.DoFn):
               total_streams,
           ))
 
-    self._session_cache.pop(table_key, None)
+    # Note: we intentionally do NOT evict the session from _session_cache here.
+    # When split() produces multiple sub-restrictions for the same table_key,
+    # each split's process() call needs the same cached session.  The cache
+    # entry is overwritten naturally when initial_restriction is called for the
+    # next table, keeping the dict at ~1 entry.
 
   def _create_read_session(self, table_ref):
     """Create a BigQuery Storage ReadSession for the given table."""

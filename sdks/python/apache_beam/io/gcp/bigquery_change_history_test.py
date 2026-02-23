@@ -40,7 +40,7 @@ import uuid
 import apache_beam as beam
 from apache_beam.io.gcp.bigquery_change_history import ReadBigQueryChangeHistory
 from apache_beam.io.gcp.bigquery_change_history import _CleanupTempTablesFn
-from apache_beam.io.gcp.bigquery_change_history import _PollChangeHistorySDF
+from apache_beam.io.gcp.bigquery_change_history import _PollChangeHistoryFn
 from apache_beam.io.gcp.bigquery_change_history import _QueryResult
 from apache_beam.io.gcp.bigquery_change_history import _ReadStorageStreamsSDF
 from apache_beam.io.gcp.bigquery_change_history import _table_key
@@ -439,7 +439,7 @@ class ReadStorageStreamsSDFTest(BigQueryChangeHistoryIntegrationBase):
 
 
 class PollChangeHistorySDFTest(BigQueryChangeHistoryIntegrationBase):
-  """Integration tests for _PollChangeHistorySDF against real BigQuery."""
+  """Integration tests for _PollChangeHistoryFn against real BigQuery."""
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
@@ -483,7 +483,7 @@ class PollChangeHistorySDFTest(BigQueryChangeHistoryIntegrationBase):
         stop_time=time.time() + 5,
         poll_interval_sec=60)
 
-    poll_sdf = _PollChangeHistorySDF(
+    poll_sdf = _PollChangeHistoryFn(
         table=table_str,
         project=self.project,
         change_function='APPENDS',
@@ -564,7 +564,7 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
           p
           | beam.Create([config])
           | 'PollChangeHistory' >> beam.ParDo(
-              _PollChangeHistorySDF(
+              _PollChangeHistoryFn(
                   table=table_str,
                   project=self.project,
                   change_function='APPENDS',
