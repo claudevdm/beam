@@ -40,6 +40,7 @@ import uuid
 import apache_beam as beam
 from apache_beam.io.gcp.bigquery_change_history import ReadBigQueryChangeHistory
 from apache_beam.io.gcp.bigquery_change_history import _CleanupTempTablesFn
+from apache_beam.io.gcp.bigquery_change_history import _ExecuteQueryFn
 from apache_beam.io.gcp.bigquery_change_history import _PollChangeHistoryFn
 from apache_beam.io.gcp.bigquery_change_history import _QueryResult
 from apache_beam.io.gcp.bigquery_change_history import _ReadStorageStreamsSDF
@@ -51,11 +52,6 @@ from apache_beam.io.gcp.internal.clients import bigquery
 from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
-
-try:
-  from apitools.base.py.exceptions import HttpError
-except ImportError:
-  HttpError = None
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -466,7 +462,7 @@ class PollChangeHistorySDFTest(BigQueryChangeHistoryIntegrationBase):
     super().tearDownClass()
 
   def test_poll_produces_query_result(self):
-    """Triggering the poll SDF produces a _QueryResult with temp table."""
+    """Triggering the poll SDF + ExecuteQueryFn produces a _QueryResult."""
     table_str = f'{self.project}:{self.dataset}.{self.test_table_id}'
     # Use a time range covering our insert
     start_time = self.insert_time - 120  # 2 min before insert
@@ -494,7 +490,12 @@ class PollChangeHistorySDFTest(BigQueryChangeHistoryIntegrationBase):
         poll_interval_sec=60)
 
     with TestPipeline() as p:
-      results = (p | beam.Create([config]) | beam.ParDo(poll_sdf))
+      results = (
+          p
+          | beam.Create([config])
+          | beam.ParDo(poll_sdf)
+          | beam.Reshuffle()
+          | beam.ParDo(_ExecuteQueryFn()))
 
       result_count = results | beam.combiners.Count.Globally()
       # Should produce at least 1 _QueryResult
@@ -559,8 +560,8 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
         poll_interval_sec=60)
 
     with TestPipeline() as p:
-      # Stage 1: Poll SDF
-      query_results = (
+      # Stage 1a: Poll SDF emits _QueryRange
+      query_ranges = (
           p
           | beam.Create([config])
           | 'PollChangeHistory' >> beam.ParDo(
@@ -573,6 +574,13 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
                   start_time=start_time,
                   stop_time=time.time() + 5,
                   poll_interval_sec=60)))
+
+      # Stage 1b/1c: Reshuffle + execute queries
+      query_results = (
+          query_ranges
+          | 'CommitQueryRanges' >> beam.Reshuffle()
+          | 'ExecuteQueries' >> beam.ParDo(_ExecuteQueryFn())
+          | 'CommitQueryResults' >> beam.Reshuffle())
 
       # Stage 2: Read via Storage Read API
       read_outputs = (

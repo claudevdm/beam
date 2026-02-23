@@ -37,9 +37,10 @@ Usage::
                 poll_interval_sec=60))
 
 Architecture: Three-stage pipeline
-  Stage 1: PeriodicImpulse + stateful DoFn. PeriodicImpulse fires on
-           interval; stateful DoFn tracks last-queried timestamp in state,
-           executes CHANGES/APPENDS query, writes results to temp table.
+  Stage 1: Custom polling SDF. Uses defer_remainder() for poll timing and
+           ManualWatermarkEstimator to hold the watermark at the data's
+           actual timestamps. Executes CHANGES/APPENDS query, writes
+           results to temp table, emits _QueryResult.
   Stage 2: SDF reads temp table via Storage Read API with dynamic splitting.
   Stage 3: Stateful DoFn tracks stream completion, deletes temp tables.
 """
@@ -47,6 +48,7 @@ Architecture: Three-stage pipeline
 import dataclasses
 import datetime
 import logging
+import sys
 import time
 import uuid
 from typing import Optional
@@ -56,10 +58,12 @@ from apache_beam.io.gcp import bigquery_tools
 from apache_beam.io.gcp.internal.clients import bigquery
 from apache_beam.io.restriction_trackers import OffsetRange
 from apache_beam.io.restriction_trackers import OffsetRestrictionTracker
+from apache_beam.io.iobase import WatermarkEstimator
 from apache_beam.io.watermark_estimators import ManualWatermarkEstimator
 from apache_beam.metrics import Metrics
+from apache_beam.runners import sdf_utils
+from apache_beam.transforms import core
 from apache_beam.transforms.core import WatermarkEstimatorProvider
-from apache_beam.transforms.periodicsequence import PeriodicImpulse
 from apache_beam.transforms.window import TimestampedValue
 from apache_beam.utils.timestamp import MAX_TIMESTAMP
 from apache_beam.utils.timestamp import Timestamp
@@ -104,6 +108,43 @@ class _QueryResult:
   temp_table_ref: Optional[bigquery.TableReference] = None
   range_start: float = 0.0
   range_end: float = 0.0
+
+
+@dataclasses.dataclass
+class _PollConfig:
+  """Configuration element for the polling SDF.
+
+  Created by ReadBigQueryChangeHistory.expand() and passed as the input
+  element to _PollChangeHistoryFn.
+  """
+  table: str
+  project: str
+  change_function: str
+  buffer_sec: float
+  temp_dataset: str
+  start_time: float
+  stop_time: object  # float (epoch seconds) or MAX_TIMESTAMP
+  poll_interval_sec: float
+  trace: bool = False
+  location: Optional[str] = None
+
+
+@dataclasses.dataclass
+class _QueryRange:
+  """Lightweight instruction emitted by the polling SDF.
+
+  Contains the time range to query and the config needed to execute it.
+  A Reshuffle commits this element before the expensive BQ query runs in
+  a downstream DoFn, preventing duplicate queries on SDF re-dispatch.
+  """
+  table: str
+  project: str
+  change_function: str
+  temp_dataset: str
+  chunk_start: float
+  chunk_end: float
+  trace: bool = False
+  location: Optional[str] = None
 
 
 class _StreamRestriction:
@@ -185,6 +226,94 @@ class _StreamRestrictionTracker(beam.io.iobase.RestrictionTracker):
     return True
 
 
+class _NonSplittableOffsetTracker(OffsetRestrictionTracker):
+  """OffsetRestrictionTracker that allows checkpointing but prevents splitting.
+
+  Checkpointing (fraction=0) is required for defer_remainder(). All other
+  split fractions are refused, ensuring the polling SDF runs as a singleton.
+  """
+  def try_split(self, fraction_of_remainder):
+    if fraction_of_remainder == 0:
+      return super().try_split(fraction_of_remainder)
+    return None
+
+
+class _PollWatermarkEstimator(WatermarkEstimator):
+  """Watermark estimator that tracks both a watermark hold and poll cursor.
+
+  The watermark hold (reported via current_watermark) is set to start_ts —
+  the earliest data timestamp emitted by the current poll. This prevents
+  downstream stages from seeing data as late.
+
+  The poll cursor (last_end_ts) tracks where the next poll should start.
+  This is separate from the watermark so we can hold the watermark back
+  at start_ts while still advancing the poll cursor to end_ts.
+
+  State is checkpointed as (watermark_hold_micros, last_end_ts_float) so
+  both values survive SDF re-dispatch.
+  """
+  def __init__(self, state):
+    # state is (watermark_hold: Timestamp, last_end_ts: float)
+    self._watermark_hold, self._last_end_ts = state
+
+  def observe_timestamp(self, timestamp):
+    pass
+
+  def current_watermark(self):
+    return self._watermark_hold
+
+  def get_estimator_state(self):
+    return (self._watermark_hold, self._last_end_ts)
+
+  def set_watermark(self, timestamp):
+    if not isinstance(timestamp, Timestamp):
+      raise ValueError('set_watermark expects a Timestamp as input')
+    if self._watermark_hold and self._watermark_hold > timestamp:
+      raise ValueError(
+          'Watermark must be monotonically increasing. '
+          'Provided %s < current %s' % (timestamp, self._watermark_hold))
+    self._watermark_hold = timestamp
+
+  def advance_poll_cursor(self, end_ts):
+    """Record end_ts so the next poll starts from here."""
+    self._last_end_ts = end_ts
+
+  def poll_cursor(self):
+    """Return the start_ts for the next poll."""
+    return self._last_end_ts
+
+
+class _PollWatermarkEstimatorProvider(WatermarkEstimatorProvider):
+  """Provider for _PollWatermarkEstimator.
+
+  Initializes with watermark hold at start_time and poll cursor at
+  start_time (first poll will query from start_time).
+  """
+  def initial_estimator_state(self, element, restriction):
+    return (Timestamp(element.start_time), element.start_time)
+
+  def create_watermark_estimator(self, estimator_state):
+    return _PollWatermarkEstimator(estimator_state)
+
+
+class _PollChangeHistoryRestrictionProvider(core.RestrictionProvider):
+  """Restriction provider for the unbounded polling SDF."""
+  def initial_restriction(self, element):
+    return OffsetRange(0, sys.maxsize)
+
+  def create_tracker(self, restriction):
+    return _NonSplittableOffsetTracker(restriction)
+
+  def restriction_size(self, element, restriction):
+    return 1
+
+  def split(self, element, restriction):
+    yield restriction
+
+  def truncate(self, element, restriction):
+    return None
+
+
 def _table_key(table_ref):
   """Convert a TableReference to a 'project.dataset.table' string."""
   return f'{table_ref.projectId}.{table_ref.datasetId}.{table_ref.tableId}'
@@ -262,30 +391,32 @@ def _max_default_zero(values):
 
 
 # =============================================================================
-# Stage 1 — _PollChangeHistoryFn (Stateful DoFn)
+# Stage 1 — _PollChangeHistoryFn (Polling SDF)
 # =============================================================================
 
 
 class _PollChangeHistoryFn(beam.DoFn):
-  """Stateful DoFn that polls BQ change history and emits _QueryResult elements.
+  """SDF that periodically emits _QueryRange instructions.
 
-  Receives (key, timestamp) elements from PeriodicImpulse + Map.
-  Uses CombiningValueStateSpec to track the last queried end timestamp.
-  The singleton key ensures only one instance processes at a time,
-  serializing polls naturally without custom split prevention.
+  Uses defer_remainder() for poll timing and ManualWatermarkEstimator to
+  control the watermark directly. The watermark is held at start_time
+  initially, then advanced to end_ts after each poll.
 
-  On each invocation:
-  1. Reads last_end_ts from state (or uses start_time if 0)
-  2. Computes end_ts = now - buffer_sec
-  3. If end_ts <= last_end_ts: skip (nothing new)
-  4. Chunks into safe ranges (<=1 day for CHANGES)
-  5. Executes each chunk as a BQ query writing to a unique temp table
-  6. Yields _QueryResult per temp table
-  7. Writes end_ts to state
+  This SDF is intentionally lightweight — it only computes time ranges and
+  yields _QueryRange elements. The expensive BQ query execution happens in
+  a downstream _ExecuteQueryFn after a Reshuffle commits the range element.
+  This prevents duplicate queries when Dataflow re-dispatches the SDF to
+  a different worker before the checkpoint is committed.
+
+  Derives start_ts from the current watermark (replaces BagState). On each
+  poll:
+  1. start_ts = poll cursor (last end_ts, or start_time on first poll)
+  2. end_ts = now - buffer_sec
+  3. Computes query chunks, yields _QueryRange per chunk
+  4. Advances poll cursor to end_ts (for next poll's start)
+  5. Advances watermark to start_ts (earliest data in this poll)
+  6. Defers to next poll interval
   """
-  LAST_END_TS = beam.transforms.userstate.CombiningValueStateSpec(
-      'last_end_ts', _max_default_zero)
-
   def __init__(
       self,
       table,
@@ -294,7 +425,9 @@ class _PollChangeHistoryFn(beam.DoFn):
       buffer_sec,
       temp_dataset,
       start_time,
-      trace,
+      stop_time,
+      poll_interval_sec,
+      trace=False,
       location=None):
     self._table = table
     self._project = project
@@ -302,6 +435,8 @@ class _PollChangeHistoryFn(beam.DoFn):
     self._buffer_sec = buffer_sec
     self._temp_dataset = temp_dataset
     self._start_time = start_time
+    self._stop_time = stop_time
+    self._poll_interval_sec = poll_interval_sec
     self._trace = trace
     self._location = location
 
@@ -309,146 +444,217 @@ class _PollChangeHistoryFn(beam.DoFn):
     if self._trace:
       _LOGGER.warning(msg, *args)
 
-  def setup(self):
-    self._log(
-        '[Stage1-Poll] setup: creating BigQueryWrapper for table=%s, '
-        'project=%s, temp_dataset=%s',
-        self._table,
-        self._project,
-        self._temp_dataset)
-    self._bq_wrapper = bigquery_tools.BigQueryWrapper()
-    # Detect location from source table's dataset if not specified
-    if self._location is None:
-      table_normalized = self._table.replace(':', '.')
-      parts = table_normalized.split('.')
-      if len(parts) == 3:
-        try:
-          self._log(
-              '[Stage1-Poll] Detecting location from dataset %s.%s',
-              parts[0],
-              parts[1])
-          ds = self._bq_wrapper.client.datasets.Get(
-              bigquery.BigqueryDatasetsGetRequest(
-                  projectId=parts[0], datasetId=parts[1]))
-          self._location = ds.location
-          self._log(
-              '[Stage1-Poll] Detected dataset location: %s', self._location)
-        except Exception as e:
-          _LOGGER.warning(
-              '[Stage1-Poll] Could not detect dataset location: %s', e)
-    self._log(
-        '[Stage1-Poll] Creating/verifying temp dataset %s.%s (location=%s)',
-        self._project,
-        self._temp_dataset,
-        self._location)
-    self._bq_wrapper.get_or_create_dataset(
-        self._project, self._temp_dataset, location=self._location)
-    self._log(
-        '[Stage1-Poll] setup complete: project=%s, temp_dataset=%s, '
-        'table=%s, location=%s, change_function=%s, buffer_sec=%.1f, '
-        'start_time=%.1f',
-        self._project,
-        self._temp_dataset,
-        self._table,
-        self._location,
-        self._change_function,
-        self._buffer_sec,
-        self._start_time)
+  @beam.DoFn.unbounded_per_element()
+  def process(
+      self,
+      element,
+      restriction_tracker=beam.DoFn.RestrictionParam(
+          _PollChangeHistoryRestrictionProvider()),
+      watermark_estimator=beam.DoFn.WatermarkEstimatorParam(
+          _PollWatermarkEstimatorProvider())):
+    assert isinstance(restriction_tracker, sdf_utils.RestrictionTrackerView)
 
-  def process(self, element, last_end_ts=beam.DoFn.StateParam(LAST_END_TS)):
-    now = time.time()
+    current_index = restriction_tracker.current_restriction().start
 
-    # Read state: last queried end timestamp
-    start_ts = last_end_ts.read()
-    if start_ts == 0:
-      start_ts = self._start_time
+    while True:
+      now = time.time()
 
-    end_ts = now - self._buffer_sec
+      # Derive start_ts from the poll cursor (not the watermark).
+      # The poll cursor tracks end_ts from the previous poll, advancing
+      # independently of the watermark hold.
+      start_ts = watermark_estimator.poll_cursor()
+      end_ts = now - self._buffer_sec
 
-    self._log(
-        '[Stage1-Poll] process: now=%.1f, '
-        'start_ts=%.1f (%s), end_ts=%.1f (%s), buffer_sec=%.1f',
-        now,
-        start_ts,
-        datetime.datetime.fromtimestamp(start_ts,
-                                        tz=datetime.timezone.utc).isoformat(),
-        end_ts,
-        datetime.datetime.fromtimestamp(end_ts,
-                                        tz=datetime.timezone.utc).isoformat(),
-        self._buffer_sec)
+      # Wall-clock gate: defer BEFORE try_claim so the restriction index
+      # doesn't advance on each re-dispatch. The previous poll ran at
+      # approximately (start_ts + buffer), so the next poll should not
+      # start before (start_ts + buffer + poll_interval).
+      # Skip on the very first poll (poll_cursor == start_time).
+      is_first_poll = abs(start_ts - self._start_time) < 0.001
+      if not is_first_poll:
+        earliest_next_poll = start_ts + self._buffer_sec + \
+            self._poll_interval_sec
+        if now < earliest_next_poll:
+          if self._stop_time != MAX_TIMESTAMP and \
+              earliest_next_poll >= self._stop_time:
+            break
+          restriction_tracker.defer_remainder(Timestamp.of(earliest_next_poll))
+          break
 
-    if end_ts <= start_ts:
+      if not restriction_tracker.try_claim(current_index):
+        break
+
       self._log(
-          '[Stage1-Poll] No new data to poll: end_ts=%.1f <= '
-          'start_ts=%.1f, skipping',
+          '[Stage1-Poll] process: poll_index=%d, now=%.1f, '
+          'start_ts=%.1f (%s), end_ts=%.1f (%s), buffer_sec=%.1f',
+          current_index,
+          now,
+          start_ts,
+          datetime.datetime.fromtimestamp(start_ts,
+                                          tz=datetime.timezone.utc).isoformat(),
           end_ts,
-          start_ts)
-      return
+          datetime.datetime.fromtimestamp(end_ts,
+                                          tz=datetime.timezone.utc).isoformat(),
+          self._buffer_sec)
 
-    ranges = compute_ranges(start_ts, end_ts, self._change_function)
-    self._log(
-        '[Stage1-Poll] Polling %s: %d chunks covering [%s, %s)',
-        self._table,
-        len(ranges),
-        datetime.datetime.fromtimestamp(start_ts,
-                                        tz=datetime.timezone.utc).isoformat(),
-        datetime.datetime.fromtimestamp(end_ts,
-                                        tz=datetime.timezone.utc).isoformat())
-    Metrics.counter('BigQueryChangeHistory', 'polls').inc()
+      if end_ts <= start_ts:
+        self._log(
+            '[Stage1-Poll] No new data to poll: end_ts=%.1f <= '
+            'start_ts=%.1f, deferring',
+            end_ts,
+            start_ts)
+        next_poll = now + self._poll_interval_sec
+        if self._stop_time != MAX_TIMESTAMP and next_poll >= self._stop_time:
+          break
+        restriction_tracker.defer_remainder(Timestamp.of(next_poll))
+        break
 
-    for chunk_idx, (chunk_start, chunk_end) in enumerate(ranges):
+      # Check stop time
+      if self._stop_time != MAX_TIMESTAMP and now >= self._stop_time:
+        self._log('[Stage1-Poll] Stop time reached, finishing')
+        break
+
+      ranges = compute_ranges(start_ts, end_ts, self._change_function)
       self._log(
-          '[Stage1-Poll] Executing chunk %d/%d: [%.1f, %.1f)',
-          chunk_idx + 1,
+          '[Stage1-Poll] Polling %s: %d chunks covering [%s, %s)',
+          self._table,
           len(ranges),
-          chunk_start,
-          chunk_end)
-      query_result = self._execute_query(chunk_start, chunk_end)
+          datetime.datetime.fromtimestamp(start_ts,
+                                          tz=datetime.timezone.utc).isoformat(),
+          datetime.datetime.fromtimestamp(end_ts,
+                                          tz=datetime.timezone.utc).isoformat())
+      Metrics.counter('BigQueryChangeHistory', 'polls').inc()
+
+      # Build lightweight _QueryRange instructions — no BQ calls here.
+      # The expensive query execution happens in _ExecuteQueryFn after
+      # a Reshuffle commits these elements.
+      query_ranges = []
+      for chunk_idx, (chunk_start, chunk_end) in enumerate(ranges):
+        query_ranges.append(
+            _QueryRange(
+                table=self._table,
+                project=self._project,
+                change_function=self._change_function,
+                temp_dataset=self._temp_dataset,
+                chunk_start=chunk_start,
+                chunk_end=chunk_end,
+                trace=self._trace,
+                location=self._location))
+        self._log(
+            '[Stage1-Poll] Emitting _QueryRange %d/%d: [%.1f, %.1f)',
+            chunk_idx + 1,
+            len(ranges),
+            chunk_start,
+            chunk_end)
+
+      # Advance poll cursor to end_ts so the next poll starts there.
+      watermark_estimator.advance_poll_cursor(end_ts)
+
+      # Advance watermark to start_ts — the earliest data timestamp in
+      # this poll. This tells downstream "data from start_ts onward is
+      # in flight" and prevents rows with timestamps in [start_ts, end_ts)
+      # from being considered late.
+      # Element event time is also set to start_ts for consistency.
       self._log(
-          '[Stage1-Poll] Chunk %d/%d produced _QueryResult: '
-          'temp_table=%s',
-          chunk_idx + 1,
-          len(ranges),
-          _table_key(query_result.temp_table_ref))
-      # Emit with timestamp=range_start so the element holds the watermark
-      # while buffered between Stage 1 and Stage 2.  Without this, the
-      # watermark advances freely between polls and the SDF's watermark
-      # estimator can't pull it back — only prevent further advancement.
-      yield TimestampedValue(query_result, Timestamp(chunk_start))
-      Metrics.counter('BigQueryChangeHistory', 'queries').inc()
+          '[Stage1-Poll] Advancing watermark to start_ts: %.1f (%s), '
+          'poll cursor to end_ts: %.1f (%s)',
+          start_ts,
+          datetime.datetime.fromtimestamp(start_ts,
+                                          tz=datetime.timezone.utc).isoformat(),
+          end_ts,
+          datetime.datetime.fromtimestamp(end_ts,
+                                          tz=datetime.timezone.utc).isoformat())
+      watermark_estimator.set_watermark(Timestamp(start_ts))
 
-    # Update state: record how far we've queried
-    self._log(
-        '[Stage1-Poll] Updating state: last_end_ts=%.1f (%s)',
-        end_ts,
-        datetime.datetime.fromtimestamp(end_ts,
-                                        tz=datetime.timezone.utc).isoformat())
-    last_end_ts.add(end_ts)
+      # Defer BEFORE yielding elements. This ensures the restriction
+      # tracker is checkpointed even if the runner abandons the generator
+      # mid-yield (e.g., during worker rescaling). The yielded elements
+      # are still part of the current bundle and committed atomically
+      # with the checkpoint.
+      next_poll = now + self._poll_interval_sec
+      if self._stop_time != MAX_TIMESTAMP and next_poll >= self._stop_time:
+        self._log('[Stage1-Poll] Stop time will be reached, finishing')
+        # Still yield the current poll's results before stopping.
+        for qr in query_ranges:
+          yield TimestampedValue(qr, Timestamp(start_ts))
+        break
+      restriction_tracker.defer_remainder(Timestamp.of(next_poll))
 
-  def _execute_query(self, start_ts, end_ts):
-    """Execute a CHANGES/APPENDS query and return _QueryResult."""
+      for qr in query_ranges:
+        yield TimestampedValue(qr, Timestamp(start_ts))
+      break
+
+
+class _ExecuteQueryFn(beam.DoFn):
+  """Executes a BQ CHANGES/APPENDS query from a _QueryRange instruction.
+
+  Runs after a Reshuffle so the _QueryRange element is committed before
+  the expensive BQ query starts. This prevents duplicate queries when
+  the upstream polling SDF is re-dispatched to a different worker.
+  """
+  def __init__(self, trace=False):
+    self._trace = trace
+
+  def _log(self, msg, *args):
+    if self._trace:
+      _LOGGER.warning(msg, *args)
+
+  def setup(self):
+    self._bq_wrapper = bigquery_tools.BigQueryWrapper()
+    self._location_cache = {}  # project.dataset → location
+
+  def _detect_location(self, qr):
+    """Detect and cache BQ dataset location from the source table."""
+    if qr.location is not None:
+      return qr.location
+    table_normalized = qr.table.replace(':', '.')
+    parts = table_normalized.split('.')
+    if len(parts) == 3:
+      cache_key = f'{parts[0]}.{parts[1]}'
+      if cache_key in self._location_cache:
+        return self._location_cache[cache_key]
+      try:
+        ds = self._bq_wrapper.client.datasets.Get(
+            bigquery.BigqueryDatasetsGetRequest(
+                projectId=parts[0], datasetId=parts[1]))
+        self._location_cache[cache_key] = ds.location
+        self._log('[Stage1-Query] Detected location: %s', ds.location)
+        return ds.location
+      except Exception as e:
+        _LOGGER.warning(
+            '[Stage1-Query] Could not detect dataset location: %s', e)
+    return None
+
+  def process(self, qr):
+    """Execute the BQ query described by a _QueryRange and yield _QueryResult.
+    """
+    location = self._detect_location(qr)
+
+    # Ensure temp dataset exists
+    self._bq_wrapper.get_or_create_dataset(
+        qr.project, qr.temp_dataset, location=location)
+
     sql = build_changes_query(
-        self._table, start_ts, end_ts, self._change_function)
+        qr.table, qr.chunk_start, qr.chunk_end, qr.change_function)
     temp_table_id = f'beam_ch_temp_{uuid.uuid4().hex[:8]}'
     job_id = f'beam_ch_{uuid.uuid4().hex[:12]}'
 
     self._log(
-        '[Stage1-Poll] _execute_query: job_id=%s, temp_table=%s.%s, sql=%s',
+        '[Stage1-Query] job_id=%s, temp_table=%s.%s, range=[%.1f, %.1f)',
         job_id,
-        self._temp_dataset,
+        qr.temp_dataset,
         temp_table_id,
-        sql)
+        qr.chunk_start,
+        qr.chunk_end)
 
     temp_table_ref = bigquery.TableReference(
-        projectId=self._project,
-        datasetId=self._temp_dataset,
-        tableId=temp_table_id)
+        projectId=qr.project, datasetId=qr.temp_dataset, tableId=temp_table_id)
 
     reference = bigquery.JobReference(
-        jobId=job_id, projectId=self._project, location=self._location)
+        jobId=job_id, projectId=qr.project, location=location)
 
     request = bigquery.BigqueryJobsInsertRequest(
-        projectId=self._project,
+        projectId=qr.project,
         job=bigquery.Job(
             configuration=bigquery.JobConfiguration(
                 query=bigquery.JobConfigurationQuery(
@@ -460,20 +666,22 @@ class _PollChangeHistoryFn(beam.DoFn):
             ),
             jobReference=reference))
 
-    self._log('[Stage1-Poll] Submitting BQ job %s...', job_id)
+    self._log('[Stage1-Query] Submitting BQ job %s...', job_id)
     response = self._bq_wrapper._start_job(request)
-    self._log(
-        '[Stage1-Poll] BQ job %s submitted, waiting for completion...', job_id)
+    self._log('[Stage1-Query] BQ job %s submitted, waiting...', job_id)
     self._bq_wrapper.wait_for_bq_job(
         response.jobReference, sleep_duration_sec=2)
     self._log(
-        '[Stage1-Poll] BQ job %s DONE. Results in %s.%s',
+        '[Stage1-Query] BQ job %s DONE. Results in %s.%s',
         job_id,
-        self._temp_dataset,
+        qr.temp_dataset,
         temp_table_id)
+    Metrics.counter('BigQueryChangeHistory', 'queries').inc()
 
-    return _QueryResult(
-        temp_table_ref=temp_table_ref, range_start=start_ts, range_end=end_ts)
+    yield _QueryResult(
+        temp_table_ref=temp_table_ref,
+        range_start=qr.chunk_start,
+        range_end=qr.chunk_end)
 
 
 class _CDCWatermarkEstimatorProvider(WatermarkEstimatorProvider):
@@ -916,19 +1124,25 @@ class ReadBigQueryChangeHistory(beam.PTransform):
         start_time,
         self._stop_time)
 
-    # Stage 1: PeriodicImpulse + stateful DoFn
-    # PeriodicImpulse starts from "now" (not start_time) to avoid queuing
-    # past impulses that would each trigger a tiny catch-up BQ query.
-    # The stateful DoFn handles the full historical range [start_time, now)
-    # in a single query on its first invocation via self._start_time.
-    impulse_start = time.time()
-    query_results = (
+    # Stage 1a: Custom polling SDF emits lightweight _QueryRange instructions.
+    # The SDF uses defer_remainder() for poll timing and
+    # ManualWatermarkEstimator to hold the watermark at data timestamps.
+    # On the first invocation it handles the full historical range
+    # [start_time, now - buffer_sec) in a single poll.
+    config = _PollConfig(
+        table=self._table,
+        project=project,
+        change_function=self._change_function,
+        buffer_sec=self._buffer_sec,
+        temp_dataset=self._temp_dataset,
+        start_time=start_time,
+        stop_time=stop_time,
+        poll_interval_sec=self._poll_interval_sec,
+        trace=self._trace)
+
+    query_ranges = (
         pbegin
-        | 'PollImpulse' >> PeriodicImpulse(
-            start_timestamp=impulse_start,
-            stop_timestamp=stop_time,
-            fire_interval=self._poll_interval_sec)
-        | 'KeyForState' >> beam.Map(lambda ts: ('__poll__', ts))
+        | 'CreatePollConfig' >> beam.Create([config])
         | 'PollChangeHistory' >> beam.ParDo(
             _PollChangeHistoryFn(
                 table=self._table,
@@ -937,7 +1151,21 @@ class ReadBigQueryChangeHistory(beam.PTransform):
                 buffer_sec=self._buffer_sec,
                 temp_dataset=self._temp_dataset,
                 start_time=start_time,
+                stop_time=stop_time,
+                poll_interval_sec=self._poll_interval_sec,
                 trace=self._trace)))
+
+    # Stage 1b: Reshuffle commits _QueryRange elements before the expensive
+    # BQ query runs. This prevents duplicate queries when Dataflow
+    # re-dispatches the polling SDF to a different worker.
+    # Stage 1c: Reshuffle commits _QueryResult (temp table ref) so that
+    # if Stage 2 retries, it re-reads the existing temp table instead of
+    # re-running the BQ query.
+    query_results = (
+        query_ranges
+        | 'CommitQueryRanges' >> beam.Reshuffle()
+        | 'ExecuteQueries' >> beam.ParDo(_ExecuteQueryFn(trace=self._trace))
+        | 'CommitQueryResults' >> beam.Reshuffle())
 
     # Stage 2: Read temp tables via Storage Read API
     read_outputs = (

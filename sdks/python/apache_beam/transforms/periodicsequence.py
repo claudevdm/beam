@@ -16,6 +16,7 @@
 #
 
 import enum
+import logging
 import math
 import time
 import warnings
@@ -167,6 +168,13 @@ class ImpulseSeqGenDoFn(beam.DoFn):
 
       if current_output_timestamp > time.time():
         # we are too ahead of time, let's wait.
+        logging.warning(
+            '[PeriodicImpulse] Deferring: index=%d, '
+            'output_ts=%.1f, now=%.1f, wait=%.1f sec',
+            current_output_index,
+            current_output_timestamp,
+            time.time(),
+            current_output_timestamp - time.time())
         restriction_tracker.defer_remainder(
             timestamp.Timestamp(current_output_timestamp))
         break
