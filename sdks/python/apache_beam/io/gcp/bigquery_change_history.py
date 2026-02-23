@@ -56,7 +56,9 @@ from apache_beam.io.gcp import bigquery_tools
 from apache_beam.io.gcp.internal.clients import bigquery
 from apache_beam.io.restriction_trackers import OffsetRange
 from apache_beam.io.restriction_trackers import OffsetRestrictionTracker
+from apache_beam.io.watermark_estimators import ManualWatermarkEstimator
 from apache_beam.metrics import Metrics
+from apache_beam.transforms.core import WatermarkEstimatorProvider
 from apache_beam.transforms.periodicsequence import PeriodicImpulse
 from apache_beam.transforms.window import TimestampedValue
 from apache_beam.utils.timestamp import MAX_TIMESTAMP
@@ -71,20 +73,16 @@ _LOGGER = logging.getLogger(__name__)
 
 __all__ = ['ReadBigQueryChangeHistory']
 
-# Module-level session cache shared across all deserialized copies of the SDF.
-# The SDF runner decomposes an SDF into separate wrapper DoFns
-# (PairWithRestriction, SplitAndSizeRestrictions, ProcessSizedElements), each
-# being a separately deserialized copy.  initial_restriction() runs on one copy,
-# process() on another.  A module-level dict is visible to all copies in the
-# same worker process, bridging that gap.
-# Key: table_key string, Value: (ReadSession, total_streams)
-_session_cache = {}
-
 # Max time range for CHANGES() queries: 1 day in seconds.
 _MAX_CHANGES_RANGE_SEC = 86400
 
 # Side output tag for cleanup signals between Stage 2 and Stage 3.
 _CLEANUP_TAG = 'cleanup'
+
+# Default number of Storage Read API streams to request.
+# Matches ReadFromBigQuery's MIN_SPLIT_COUNT to enable parallelism.
+# The server may return fewer streams if the table is small.
+_DEFAULT_MAX_STREAMS = 10
 
 # =============================================================================
 # Helpers and data classes
@@ -98,9 +96,93 @@ class _QueryResult:
   After Stage 1 executes a CHANGES/APPENDS query, it emits a _QueryResult
   pointing to the temp table containing query results. Stage 2's SDF reads
   rows from that temp table via the Storage Read API.
+
+  range_start/range_end define the change_timestamp window this query covers.
+  Stage 2 uses range_start to set an initial watermark hold so the runner
+  doesn't advance the watermark past the data's timestamps.
   """
   temp_table_ref: Optional[bigquery.TableReference] = None
+  range_start: float = 0.0
   range_end: float = 0.0
+
+
+class _StreamRestriction:
+  """Restriction carrying BQ Storage stream names for cross-worker safety.
+
+  Unlike a plain OffsetRange(0, N), this restriction is self-contained:
+  each split carries the actual stream name strings so it can be processed
+  on any worker without relying on a module-level cache.
+  """
+  __slots__ = ('stream_names', 'start', 'stop')
+
+  def __init__(self, stream_names, start, stop):
+    if start > stop:
+      raise ValueError(
+          'start must not be larger than stop. '
+          'Received %d and %d respectively.' % (start, stop))
+    self.stream_names = stream_names  # tuple of BQ stream name strings
+    self.start = start
+    self.stop = stop
+
+  def __eq__(self, other):
+    if not isinstance(other, _StreamRestriction):
+      return False
+    return (
+        self.stream_names == other.stream_names and
+        self.start == other.start and self.stop == other.stop)
+
+  def __hash__(self):
+    return hash((type(self), self.stream_names, self.start, self.stop))
+
+  def __repr__(self):
+    return (
+        '_StreamRestriction(streams=%d, start=%d, stop=%d)' %
+        (len(self.stream_names), self.start, self.stop))
+
+  def split_at(self, pos):
+    return (
+        _StreamRestriction(self.stream_names, self.start, pos),
+        _StreamRestriction(self.stream_names, pos, self.stop))
+
+  def size(self):
+    return self.stop - self.start
+
+
+class _StreamRestrictionTracker(beam.io.iobase.RestrictionTracker):
+  """Tracker for _StreamRestriction, delegating offset logic to
+  OffsetRestrictionTracker."""
+  def __init__(self, restriction):
+    self._restriction = restriction
+    self._offset_tracker = OffsetRestrictionTracker(
+        OffsetRange(restriction.start, restriction.stop))
+
+  def current_restriction(self):
+    inner = self._offset_tracker.current_restriction()
+    return _StreamRestriction(
+        self._restriction.stream_names, inner.start, inner.stop)
+
+  def try_claim(self, position):
+    return self._offset_tracker.try_claim(position)
+
+  def try_split(self, fraction_of_remainder):
+    result = self._offset_tracker.try_split(fraction_of_remainder)
+    if result is not None:
+      primary, residual = result
+      names = self._restriction.stream_names
+      self._restriction = _StreamRestriction(names, primary.start, primary.stop)
+      return (
+          _StreamRestriction(names, primary.start, primary.stop),
+          _StreamRestriction(names, residual.start, residual.stop))
+    return None
+
+  def check_done(self):
+    self._offset_tracker.check_done()
+
+  def current_progress(self):
+    return self._offset_tracker.current_progress()
+
+  def is_bounded(self):
+    return True
 
 
 def _table_key(table_ref):
@@ -328,7 +410,11 @@ class _PollChangeHistoryFn(beam.DoFn):
           chunk_idx + 1,
           len(ranges),
           _table_key(query_result.temp_table_ref))
-      yield query_result
+      # Emit with timestamp=range_start so the element holds the watermark
+      # while buffered between Stage 1 and Stage 2.  Without this, the
+      # watermark advances freely between polls and the SDF's watermark
+      # estimator can't pull it back — only prevent further advancement.
+      yield TimestampedValue(query_result, Timestamp(chunk_start))
       Metrics.counter('BigQueryChangeHistory', 'queries').inc()
 
     # Update state: record how far we've queried
@@ -386,7 +472,38 @@ class _PollChangeHistoryFn(beam.DoFn):
         self._temp_dataset,
         temp_table_id)
 
-    return _QueryResult(temp_table_ref=temp_table_ref, range_end=end_ts)
+    return _QueryResult(
+        temp_table_ref=temp_table_ref, range_start=start_ts, range_end=end_ts)
+
+
+class _CDCWatermarkEstimatorProvider(WatermarkEstimatorProvider):
+  """WatermarkEstimatorProvider that initializes the hold from _QueryResult.
+
+  Uses range_start from the element to set the initial watermark hold.
+  This prevents the runner from advancing the watermark past the data's
+  timestamps before any rows are emitted, reducing "late records" warnings.
+  """
+  def initial_estimator_state(self, element, restriction):
+    if hasattr(element, 'range_start') and element.range_start > 0:
+      ts = Timestamp(element.range_start)
+      _LOGGER.warning(
+          '[Watermark] initial_estimator_state: range_start=%.1f (%s), '
+          'restriction=[%d,%d)',
+          element.range_start,
+          datetime.datetime.fromtimestamp(
+              element.range_start, tz=datetime.timezone.utc).isoformat(),
+          restriction.start,
+          restriction.stop)
+      return ts
+    _LOGGER.warning(
+        '[Watermark] initial_estimator_state: range_start not set, '
+        'returning None (no hold)')
+    return None
+
+  def create_watermark_estimator(self, estimator_state):
+    _LOGGER.warning(
+        '[Watermark] create_watermark_estimator: state=%s', estimator_state)
+    return ManualWatermarkEstimator(estimator_state)
 
 
 # =============================================================================
@@ -398,19 +515,31 @@ class _ReadStorageStreamsSDF(beam.DoFn,
                              beam.transforms.core.RestrictionProvider):
   """SDF that reads a temp table via BigQuery Storage Read API.
 
-  The DoFn is its own RestrictionProvider (see core.py:220-222). This allows
-  initial_restriction() to access self._storage_client (from setup()) to
-  create a ReadSession and discover the actual stream count. The runner then
-  sees the true restriction size and can split across workers.
+  The DoFn is its own RestrictionProvider (see core.py:220-222), which gives
+  initial_restriction() access to self._create_read_session().
+
+  Note on SDF lifecycle: the runner decomposes this SDF into three internal
+  wrapper DoFns, each a separately deserialized copy:
+    - Stage A (PairWithRestriction): calls initial_restriction() — no setup()
+    - Stage B (SplitAndSizeRestrictions): calls split(), restriction_size()
+    - Stage C (ProcessSizedElements): calls setup(), then process()
+  Because initial_restriction() runs on a different copy than process(),
+  _ensure_client() lazily creates a gRPC client on whichever copy needs one.
+  The _StreamRestriction carries stream names directly so no shared state
+  is needed between copies.
 
   Each element is a _QueryResult pointing to a temp table.
+
+  Watermark: Uses ManualWatermarkEstimator so the watermark only advances
+  as fast as the change_timestamp values we emit. Without this, the runner
+  would advance the watermark based on processing time, causing all
+  historical timestamps to be flagged as "late records."
 
   Emits:
     Main output: TimestampedValue(row_dict, change_timestamp)
     Side output (_CLEANUP_TAG): (table_key, streams_read, total_streams)
   """
-  def __init__(self, max_streams=0, trace=False):
-    self._max_streams = max_streams
+  def __init__(self, trace=False):
     self._trace = trace
     self._storage_client = None
 
@@ -440,93 +569,78 @@ class _ReadStorageStreamsSDF(beam.DoFn,
   # --- RestrictionProvider methods ---
 
   def initial_restriction(self, element):
-    """Create ReadSession and return OffsetRange(0, num_streams)."""
-    table_key = _table_key(element.temp_table_ref)
-
-    # Reuse cached session if available (e.g. bundle retry for same element).
-    cached = _session_cache.get(table_key)
-    if cached is not None:
-      session, total_streams = cached
-      self._log(
-          '[Stage2-SDF] initial_restriction for %s: reusing cached session '
-          '(%d streams)',
-          table_key,
-          total_streams)
-      return OffsetRange(0, total_streams)
-
+    """Create ReadSession and return _StreamRestriction with stream names."""
     self._ensure_client()
+    table_key = _table_key(element.temp_table_ref)
     session = self._create_read_session(element.temp_table_ref)
-    total_streams = len(session.streams)
-    _session_cache[table_key] = (session, total_streams)
+    stream_names = tuple(s.name for s in session.streams)
     self._log(
         '[Stage2-SDF] initial_restriction for %s: %d streams',
         table_key,
-        total_streams)
-    return OffsetRange(0, total_streams)
+        len(stream_names))
+    return _StreamRestriction(stream_names, 0, len(stream_names))
 
   def create_tracker(self, restriction):
-    return OffsetRestrictionTracker(restriction)
+    return _StreamRestrictionTracker(restriction)
 
   def restriction_size(self, element, restriction):
-    return restriction.stop - restriction.start
+    return restriction.size()
 
   def split(self, element, restriction):
-    """Yield one OffsetRange per stream so runner distributes them."""
-    if restriction.stop - restriction.start <= 1:
+    """Yield one _StreamRestriction per stream for parallel distribution."""
+    if restriction.size() <= 1:
       yield restriction
     else:
       for i in range(restriction.start, restriction.stop):
-        yield OffsetRange(i, i + 1)
+        yield _StreamRestriction(restriction.stream_names, i, i + 1)
 
   def is_bounded(self):
     return True
 
   # --- Process ---
 
-  def process(self, element, restriction_tracker=beam.DoFn.RestrictionParam()):
+  def process(
+      self,
+      element,
+      restriction_tracker=beam.DoFn.RestrictionParam(),
+      watermark_estimator=beam.DoFn.WatermarkEstimatorParam(
+          _CDCWatermarkEstimatorProvider())):
     self._ensure_client()
     table_key = _table_key(element.temp_table_ref)
 
-    # Session was created in initial_restriction and stored in module cache.
-    # Multiple splits share the same table_key, so we must NOT pop/evict here —
-    # all splits need the same session to index into the same stream list.
-    cached = _session_cache.get(table_key)
-    if cached is not None:
-      session, total_streams = cached
-    else:
-      # Cache miss should not happen in normal operation (initial_restriction
-      # always runs before process in the same worker process).  Log loudly
-      # and re-create — but this means stream indices from split() may not
-      # align with the new session's streams, so this is best-effort only.
-      _LOGGER.warning(
-          '[Stage2-SDF] UNEXPECTED cache miss for %s — re-creating '
-          'ReadSession. Stream indices may be stale.',
-          table_key)
-      session = self._create_read_session(element.temp_table_ref)
-      total_streams = len(session.streams)
-      _session_cache[table_key] = (session, total_streams)
+    restriction = restriction_tracker.current_restriction()
+    stream_names = restriction.stream_names
+    total_streams = len(stream_names)
+
+    # Log watermark state at process() entry
+    current_wm = watermark_estimator.current_watermark()
+    self._log(
+        '[Stage2-SDF] process() entry for %s: '
+        'current_watermark=%s, range_start=%.1f (%s)',
+        table_key,
+        current_wm,
+        element.range_start,
+        datetime.datetime.fromtimestamp(
+            element.range_start, tz=datetime.timezone.utc).isoformat()
+        if element.range_start > 0 else 'N/A')
 
     streams_read = 0
     total_rows = 0
+    first_wm_logged = False
 
     if total_streams == 0:
-      # Empty table — nothing to read. Emit cleanup signal to delete
-      # the temp table.
       self._log(
           '[Stage2-SDF] Empty table %s (0 streams), emitting cleanup',
           table_key)
     else:
-      # Read streams according to restriction
-      restriction = restriction_tracker.current_restriction()
-      stream_end = min(restriction.stop, total_streams)
       self._log(
           '[Stage2-SDF] Reading streams [%d, %d) of %d total for %s',
           restriction.start,
-          stream_end,
+          restriction.stop,
           total_streams,
           table_key)
 
-      for i in range(restriction.start, stream_end):
+      for i in range(restriction.start, restriction.stop):
         if not restriction_tracker.try_claim(i):
           self._log(
               '[Stage2-SDF] try_claim(%d) FAILED for %s — '
@@ -535,7 +649,7 @@ class _ReadStorageStreamsSDF(beam.DoFn,
               table_key)
           break
 
-        stream_name = session.streams[i].name
+        stream_name = stream_names[i]
         self._log(
             '[Stage2-SDF] try_claim(%d) succeeded — reading stream %s',
             i,
@@ -548,6 +662,25 @@ class _ReadStorageStreamsSDF(beam.DoFn,
             ts = Timestamp(0)
           elif isinstance(ts, datetime.datetime):
             ts = Timestamp.from_utc_datetime(ts)
+
+          # Advance watermark to track progress. ManualWatermarkEstimator
+          # requires monotonically increasing values, so only advance
+          # when we see a timestamp beyond the current watermark.
+          current_wm = watermark_estimator.current_watermark()
+          if current_wm is None or ts > current_wm:
+            if not first_wm_logged:
+              self._log(
+                  '[Watermark] First set_watermark for %s: '
+                  'old=%s, new=%s, row_ts=%s',
+                  table_key,
+                  current_wm,
+                  ts,
+                  datetime.datetime.fromtimestamp(
+                      ts.seconds(), tz=datetime.timezone.utc).isoformat()
+                  if hasattr(ts, 'seconds') else str(ts))
+              first_wm_logged = True
+            watermark_estimator.set_watermark(ts)
+
           yield TimestampedValue(row, ts)
           stream_rows += 1
           total_rows += 1
@@ -579,12 +712,6 @@ class _ReadStorageStreamsSDF(beam.DoFn,
               total_streams,
           ))
 
-    # Note: we intentionally do NOT evict the session from _session_cache here.
-    # When split() produces multiple sub-restrictions for the same table_key,
-    # each split's process() call needs the same cached session.  The cache
-    # entry is overwritten naturally when initial_restriction is called for the
-    # next table, keeping the dict at ~1 entry.
-
   def _create_read_session(self, table_ref):
     """Create a BigQuery Storage ReadSession for the given table."""
     table_path = (
@@ -602,7 +729,7 @@ class _ReadStorageStreamsSDF(beam.DoFn,
     session = self._storage_client.create_read_session(
         parent=f'projects/{table_ref.projectId}',
         read_session=requested_session,
-        max_stream_count=self._max_streams)
+        max_stream_count=_DEFAULT_MAX_STREAMS)
     self._log(
         '[Stage2-SDF] _create_read_session: table=%s, %d streams',
         table_path,
@@ -721,8 +848,6 @@ class ReadBigQueryChangeHistory(beam.PTransform):
     change_function: 'CHANGES' or 'APPENDS'. Default 'APPENDS'.
     buffer_sec: Safety buffer behind now(). Default: 600 for CHANGES,
         15 for APPENDS.
-    max_streams: Max Storage Read API streams per read. Default 0
-        (server decides optimal count based on table size).
     project: GCP project ID. Default: from pipeline options.
     temp_dataset: Dataset for temp tables. Default 'beam_ch_temp'.
     trace: If True, emit detailed pipeline execution trace logs at
@@ -736,7 +861,6 @@ class ReadBigQueryChangeHistory(beam.PTransform):
       stop_time=None,
       change_function='APPENDS',
       buffer_sec=None,
-      max_streams=0,
       project=None,
       temp_dataset='beam_ch_temp',
       trace=False):
@@ -757,7 +881,6 @@ class ReadBigQueryChangeHistory(beam.PTransform):
     self._buffer_sec = (
         buffer_sec if buffer_sec is not None else
         (600 if change_function == 'CHANGES' else 15))
-    self._max_streams = max_streams
     self._project = project
     self._temp_dataset = temp_dataset
     self._trace = trace
@@ -783,13 +906,12 @@ class ReadBigQueryChangeHistory(beam.PTransform):
     self._log(
         '[ReadBigQueryChangeHistory] expand: table=%s, project=%s, '
         'change_function=%s, poll_interval=%d sec, buffer=%d sec, '
-        'max_streams=%d, temp_dataset=%s, start_time=%.1f, stop_time=%s',
+        'temp_dataset=%s, start_time=%.1f, stop_time=%s',
         self._table,
         project,
         self._change_function,
         self._poll_interval_sec,
         self._buffer_sec,
-        self._max_streams,
         self._temp_dataset,
         start_time,
         self._stop_time)
@@ -821,9 +943,8 @@ class ReadBigQueryChangeHistory(beam.PTransform):
     read_outputs = (
         query_results
         | 'ReadStorageStreams' >> beam.ParDo(
-            _ReadStorageStreamsSDF(
-                max_streams=self._max_streams, trace=self._trace)).with_outputs(
-                    _CLEANUP_TAG, main='rows'))
+            _ReadStorageStreamsSDF(trace=self._trace)).with_outputs(
+                _CLEANUP_TAG, main='rows'))
 
     # Stage 3: Cleanup temp tables
     _ = (

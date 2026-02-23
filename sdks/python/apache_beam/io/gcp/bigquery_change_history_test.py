@@ -385,7 +385,7 @@ class ReadStorageStreamsSDFTest(BigQueryChangeHistoryIntegrationBase):
       outputs = (
           p
           | beam.Create([query_result])
-          | beam.ParDo(_ReadStorageStreamsSDF(max_streams=2)).with_outputs(
+          | beam.ParDo(_ReadStorageStreamsSDF()).with_outputs(
               'cleanup', main='rows'))
 
       # Check that we get 3 rows
@@ -406,7 +406,7 @@ class ReadStorageStreamsSDFTest(BigQueryChangeHistoryIntegrationBase):
       outputs = (
           p
           | beam.Create([query_result])
-          | beam.ParDo(_ReadStorageStreamsSDF(max_streams=2)).with_outputs(
+          | beam.ParDo(_ReadStorageStreamsSDF()).with_outputs(
               'cleanup', main='rows'))
 
       # Verify cleanup signal
@@ -429,7 +429,7 @@ class ReadStorageStreamsSDFTest(BigQueryChangeHistoryIntegrationBase):
       outputs = (
           p
           | beam.Create([query_result])
-          | beam.ParDo(_ReadStorageStreamsSDF(max_streams=2)).with_outputs(
+          | beam.ParDo(_ReadStorageStreamsSDF()).with_outputs(
               'cleanup', main='rows'))
 
       row_count = (
@@ -578,8 +578,7 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
       read_outputs = (
           query_results
           | 'ReadStorageStreams' >> beam.ParDo(
-              _ReadStorageStreamsSDF(max_streams=2)).with_outputs(
-                  'cleanup', main='rows'))
+              _ReadStorageStreamsSDF()).with_outputs('cleanup', main='rows'))
 
       # Stage 3: Cleanup temp tables
       _ = (
@@ -621,7 +620,6 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
               stop_time=stop_time,
               change_function='APPENDS',
               buffer_sec=0,
-              max_streams=2,
               project=self.project,
               temp_dataset=self.temp_dataset))
 

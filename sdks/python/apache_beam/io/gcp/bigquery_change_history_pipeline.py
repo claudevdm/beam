@@ -97,11 +97,6 @@ def main():
       help='Start reading from this many seconds ago')
   parser.add_argument(
       '--temp_dataset', default='beam_ch_temp', help='Dataset for temp tables')
-  parser.add_argument(
-      '--max_streams',
-      type=int,
-      default=0,
-      help='Max Storage Read API streams per read (0 = server decides)')
   # Runner and Dataflow-specific args
   parser.add_argument(
       '--runner',
@@ -133,7 +128,7 @@ def main():
       format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 
   table = f'{args.project}:{args.dataset}.{args.table}'
-  start_time = time.time() - args.start_offset_sec
+  start_time = time.time() - 3600 - args.start_offset_sec
   stop_time = time.time() + args.duration_sec
 
   _LOGGER.info('Starting ReadBigQueryChangeHistory pipeline')
@@ -173,7 +168,6 @@ def main():
             stop_time=stop_time,
             change_function=args.change_function,
             buffer_sec=args.buffer_sec,
-            max_streams=args.max_streams,
             project=args.project,
             temp_dataset=args.temp_dataset,
             trace=True))
