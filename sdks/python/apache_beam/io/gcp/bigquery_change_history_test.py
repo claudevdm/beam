@@ -40,7 +40,7 @@ import uuid
 import apache_beam as beam
 from apache_beam.io.gcp.bigquery_change_history import ReadBigQueryChangeHistory
 from apache_beam.io.gcp.bigquery_change_history import _CleanupTempTablesFn
-from apache_beam.io.gcp.bigquery_change_history import _PollChangeHistoryFn
+from apache_beam.io.gcp.bigquery_change_history import _PollChangeHistorySDF
 from apache_beam.io.gcp.bigquery_change_history import _QueryResult
 from apache_beam.io.gcp.bigquery_change_history import _ReadStorageStreamsSDF
 from apache_beam.io.gcp.bigquery_change_history import _table_key
@@ -438,8 +438,8 @@ class ReadStorageStreamsSDFTest(BigQueryChangeHistoryIntegrationBase):
       assert_that(row_count, equal_to([0]), label='CheckZeroRows')
 
 
-class PollChangeHistoryFnTest(BigQueryChangeHistoryIntegrationBase):
-  """Integration tests for _PollChangeHistoryFn against real BigQuery."""
+class PollChangeHistorySDFTest(BigQueryChangeHistoryIntegrationBase):
+  """Integration tests for _PollChangeHistorySDF against real BigQuery."""
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
@@ -466,24 +466,35 @@ class PollChangeHistoryFnTest(BigQueryChangeHistoryIntegrationBase):
     super().tearDownClass()
 
   def test_poll_produces_query_result(self):
-    """Triggering the poll DoFn produces a _QueryResult with temp table."""
+    """Triggering the poll SDF produces a _QueryResult with temp table."""
     table_str = f'{self.project}:{self.dataset}.{self.test_table_id}'
     # Use a time range covering our insert
     start_time = self.insert_time - 120  # 2 min before insert
 
-    poll_fn = _PollChangeHistoryFn(
+    from apache_beam.io.gcp.bigquery_change_history import _PollConfig
+
+    config = _PollConfig(
         table=table_str,
         project=self.project,
         change_function='APPENDS',
-        buffer_sec=0,  # No buffer for testing
+        buffer_sec=0,
         temp_dataset=self.temp_dataset,
-        start_time=start_time)
+        start_time=start_time,
+        stop_time=time.time() + 5,
+        poll_interval_sec=60)
+
+    poll_sdf = _PollChangeHistorySDF(
+        table=table_str,
+        project=self.project,
+        change_function='APPENDS',
+        buffer_sec=0,
+        temp_dataset=self.temp_dataset,
+        start_time=start_time,
+        stop_time=time.time() + 5,
+        poll_interval_sec=60)
 
     with TestPipeline() as p:
-      results = (
-          p
-          | beam.Create([('__singleton__', time.time())])
-          | beam.ParDo(poll_fn))
+      results = (p | beam.Create([config]) | beam.ParDo(poll_sdf))
 
       result_count = results | beam.combiners.Count.Globally()
       # Should produce at least 1 _QueryResult
@@ -497,12 +508,11 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
   """End-to-end test: all three stages wired together.
 
   Creates a change-history-enabled table, inserts rows, then exercises:
-    Stage 1 (poll) → Stage 2 (SDF read) → Stage 3 (cleanup)
+    Stage 1 (poll SDF) → Stage 2 (read SDF) → Stage 3 (cleanup)
   and verifies rows come through and temp tables are cleaned up.
 
-  Uses beam.Create instead of PeriodicImpulse to produce a bounded
-  PCollection, avoiding windowing issues in test assertions while still
-  exercising the full three-stage pipeline end-to-end.
+  Uses beam.Create to feed a _PollConfig to the polling SDF. With
+  stop_time set shortly in the future, the SDF polls once then stops.
   """
   @classmethod
   def setUpClass(cls):
@@ -536,19 +546,33 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
     table_str = f'{self.project}:{self.dataset}.{self.test_table_id}'
     start_time = self.insert_time - 120  # 2 min before insert
 
+    from apache_beam.io.gcp.bigquery_change_history import _PollConfig
+
+    config = _PollConfig(
+        table=table_str,
+        project=self.project,
+        change_function='APPENDS',
+        buffer_sec=0,
+        temp_dataset=self.temp_dataset,
+        start_time=start_time,
+        stop_time=time.time() + 5,
+        poll_interval_sec=60)
+
     with TestPipeline() as p:
-      # Stage 1: Poll (using Create instead of PeriodicImpulse for bounded)
+      # Stage 1: Poll SDF
       query_results = (
           p
-          | beam.Create([('__singleton__', time.time())])
+          | beam.Create([config])
           | 'PollChangeHistory' >> beam.ParDo(
-              _PollChangeHistoryFn(
+              _PollChangeHistorySDF(
                   table=table_str,
                   project=self.project,
                   change_function='APPENDS',
                   buffer_sec=0,
                   temp_dataset=self.temp_dataset,
-                  start_time=start_time)))
+                  start_time=start_time,
+                  stop_time=time.time() + 5,
+                  poll_interval_sec=60)))
 
       # Stage 2: Read via Storage Read API
       read_outputs = (
@@ -581,18 +605,18 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
           equal_to([1, 2, 3]),
           label='CheckIds')
 
-  def test_public_api_with_periodic_impulse(self):
-    """ReadBigQueryChangeHistory PTransform with PeriodicImpulse + trigger."""
+  def test_public_api_ptransform(self):
+    """ReadBigQueryChangeHistory PTransform with polling SDF."""
     table_str = f'{self.project}:{self.dataset}.{self.test_table_id}'
     start_time = self.insert_time - 120  # 2 min before insert
-    stop_time = time.time() + 20  # Run for 20 more seconds
+    stop_time = time.time() + 5  # Short run for test
 
     with TestPipeline() as p:
       rows = (
           p
           | ReadBigQueryChangeHistory(
               table=table_str,
-              poll_interval_sec=5,
+              poll_interval_sec=60,
               start_time=start_time,
               stop_time=stop_time,
               change_function='APPENDS',
@@ -601,14 +625,9 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
               project=self.project,
               temp_dataset=self.temp_dataset))
 
-      # Windowed output supports Count.Globally (one count per window)
-      row_count = rows | beam.combiners.Count.Globally().without_defaults()
-      # Sum across all windows to get total count
-      total = (
-          row_count
-          | 'SumCounts' >> beam.CombineGlobally(sum).without_defaults())
+      row_count = rows | beam.combiners.Count.Globally()
       assert_that(
-          total | beam.Map(lambda c: c >= 3),
+          row_count | beam.Map(lambda c: c >= 3),
           equal_to([True]),
           label='CheckAtLeast3Rows')
 

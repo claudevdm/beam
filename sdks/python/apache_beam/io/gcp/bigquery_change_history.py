@@ -38,8 +38,9 @@ Usage::
             | beam.Map(print))
 
 Architecture: Three-stage pipeline
-  Stage 1: Stateful DoFn polls BQ on interval, executes CHANGES/APPENDS
-           query, writes results to temp table.
+  Stage 1: Polling SDF with ManualWatermarkEstimator. Polls BQ on interval
+           via defer_remainder(), executes CHANGES/APPENDS query, writes
+           results to temp table, advances watermark to queried range end.
   Stage 2: SDF reads temp table via Storage Read API with dynamic splitting.
   Stage 3: Stateful DoFn tracks stream completion, deletes temp tables.
 
@@ -49,6 +50,7 @@ See docs/bigquery-change-history/ for design documentation.
 import dataclasses
 import datetime
 import logging
+import sys
 import time
 import uuid
 from typing import Any
@@ -59,14 +61,8 @@ from apache_beam.io.gcp import bigquery_tools
 from apache_beam.io.gcp.internal.clients import bigquery
 from apache_beam.io.restriction_trackers import OffsetRange
 from apache_beam.io.restriction_trackers import OffsetRestrictionTracker
+from apache_beam.io.watermark_estimators import ManualWatermarkEstimator
 from apache_beam.metrics import Metrics
-from apache_beam.transforms.periodicsequence import PeriodicImpulse
-from apache_beam.transforms.trigger import AccumulationMode
-from apache_beam.transforms.trigger import AfterCount
-from apache_beam.transforms.trigger import AfterWatermark
-from apache_beam.transforms.trigger import Repeatedly
-from apache_beam.transforms.window import FixedWindows
-from apache_beam.transforms.window import GlobalWindows
 from apache_beam.transforms.window import TimestampedValue
 from apache_beam.utils.timestamp import Timestamp
 
@@ -484,24 +480,97 @@ class _ReadStorageStreamsSDF(beam.DoFn):
 
 
 # =============================================================================
-# Phase 4: Stage 1 — _PollChangeHistoryFn
+# Phase 4: Stage 1 — _PollChangeHistorySDF
 # =============================================================================
 
 
-class _PollChangeHistoryFn(beam.DoFn):
-  """Stateful DoFn that polls BQ change history on each trigger.
+@dataclasses.dataclass
+class _PollConfig:
+  """Configuration element for the polling SDF.
 
-  On each trigger (from PeriodicImpulse):
-  1. Reads last_end_ts from state
-  2. Computes time range [last_end_ts, now - buffer)
-  3. Chunks into safe ranges (<=1 day for CHANGES)
-  4. Executes each chunk as a BQ query writing to a unique temp table
-  5. Emits _QueryResult per temp table
-  6. Updates state with new end_ts
+  A single _PollConfig element is created by expand() and fed to the SDF.
+  The SDF loops forever (via defer_remainder), polling BQ on each invocation.
   """
-  LAST_END_TS = beam.transforms.userstate.CombiningValueStateSpec(
-      'last_end_ts', _max_default_zero)
+  table: str = ''
+  project: str = ''
+  change_function: str = 'APPENDS'
+  buffer_sec: float = 15.0
+  temp_dataset: str = 'beam_ch_temp'
+  start_time: float = 0.0
+  stop_time: Optional[float] = None
+  poll_interval_sec: int = 60
 
+
+class _NonSplittableOffsetTracker(OffsetRestrictionTracker):
+  """OffsetRestrictionTracker that refuses dynamic splitting.
+
+  Stage 1 is a singleton poller — its watermark state determines what
+  time range to query next. If the runner splits the restriction into
+  parallel workers, each worker reads the same watermark and queries
+  the same BQ time range, producing duplicate data.
+
+  Allows try_split(0) for self-checkpointing (used by defer_remainder)
+  but refuses try_split(fraction > 0) which the runner uses for
+  dynamic parallel splitting.
+  """
+  def try_split(self, fraction_of_remainder):
+    if fraction_of_remainder == 0:
+      return super().try_split(0)
+    return None
+
+
+class _PollChangeHistoryRestrictionProvider(
+    beam.transforms.core.RestrictionProvider):
+  """RestrictionProvider for the polling SDF.
+
+  Uses an unbounded OffsetRange — each offset is one poll iteration.
+  The SDF defers after each poll, so only one offset is claimed per invocation.
+
+  Key design choices:
+  - Non-splittable tracker: prevents runner from creating parallel workers
+    that would query the same BQ time range (watermark is shared state).
+  - restriction_size returns 1 (not sys.maxsize) to avoid over-prioritizing
+    this SDF over downstream stages.
+  - split() yields the restriction unsplit to prevent initial splitting.
+  """
+  def initial_restriction(self, element):
+    return OffsetRange(0, sys.maxsize)
+
+  def create_tracker(self, restriction):
+    return _NonSplittableOffsetTracker(restriction)
+
+  def restriction_size(self, element, restriction):
+    if restriction.start < restriction.stop:
+      return 1
+    return 0
+
+  def split(self, element, restriction):
+    # Don't split — this SDF is a singleton poller.
+    yield restriction
+
+  def truncate(self, element, restriction):
+    # On drain, stop immediately
+    return None
+
+  def is_bounded(self):
+    return False
+
+
+class _PollChangeHistorySDF(beam.DoFn):
+  """SDF that polls BQ change history and emits _QueryResult elements.
+
+  Replaces the old PeriodicImpulse + stateful DoFn architecture.
+  This SDF owns the polling loop via defer_remainder() and controls
+  the output watermark via ManualWatermarkEstimator.
+
+  On each invocation:
+  1. Computes time range [watermark, now - buffer)
+  2. Chunks into safe ranges (<=1 day for CHANGES)
+  3. Executes each chunk as a BQ query writing to a unique temp table
+  4. Yields _QueryResult per temp table
+  5. Advances watermark to end of queried range
+  6. Defers remainder to schedule next poll after poll_interval_sec
+  """
   def __init__(
       self,
       table,
@@ -510,6 +579,8 @@ class _PollChangeHistoryFn(beam.DoFn):
       buffer_sec,
       temp_dataset,
       start_time,
+      stop_time=None,
+      poll_interval_sec=60,
       location=None):
     self._table = table
     self._project = project
@@ -517,6 +588,8 @@ class _PollChangeHistoryFn(beam.DoFn):
     self._buffer_sec = buffer_sec
     self._temp_dataset = temp_dataset
     self._start_time = start_time
+    self._stop_time = stop_time
+    self._poll_interval_sec = poll_interval_sec
     self._location = location
 
   def setup(self):
@@ -565,12 +638,55 @@ class _PollChangeHistoryFn(beam.DoFn):
         self._buffer_sec,
         self._start_time)
 
-  def process(self, element, last_end_ts=beam.DoFn.StateParam(LAST_END_TS)):
-    _LOGGER.warning(
-        '[Stage1-Poll] process: received trigger element=%s', element)
+  @beam.DoFn.unbounded_per_element()
+  def process(
+      self,
+      element,
+      restriction_tracker=beam.DoFn.RestrictionParam(
+          _PollChangeHistoryRestrictionProvider()),
+      watermark_estimator=beam.DoFn.WatermarkEstimatorParam(
+          ManualWatermarkEstimator.default_provider())):
+    poll_index = restriction_tracker.current_restriction().start
+    now = time.time()
 
-    start_ts = last_end_ts.read() or self._start_time
-    end_ts = time.time() - self._buffer_sec
+    # Check if we've passed stop_time
+    if self._stop_time and now >= self._stop_time:
+      _LOGGER.warning(
+          '[Stage1-Poll] stop_time reached (%.1f >= %.1f), stopping',
+          now,
+          self._stop_time)
+      return
+
+    # Guard against premature re-invocation. DirectRunner doesn't honor
+    # defer_remainder() resume timestamps and immediately re-invokes the
+    # SDF. Without this check, every invocation runs a BQ query (~3s),
+    # starving downstream stages. By checking the watermark, we know when
+    # the last poll ended and can defer instantly (microseconds) until
+    # enough time has passed — giving the runner a chance to schedule
+    # Stage 2 between deferrals. This is the same pattern PeriodicImpulse
+    # uses (check wall-clock time before try_claim, defer if too early).
+    current_wm = watermark_estimator.current_watermark()
+    if current_wm is not None:
+      last_poll_end = current_wm.micros / 1e6
+      next_allowed = last_poll_end + self._poll_interval_sec
+      if now < next_allowed:
+        restriction_tracker.defer_remainder(Timestamp.of(next_allowed))
+        return
+
+    _LOGGER.warning(
+        '[Stage1-Poll] process: poll_index=%d, now=%.1f', poll_index, now)
+
+    if not restriction_tracker.try_claim(poll_index):
+      _LOGGER.warning(
+          '[Stage1-Poll] try_claim(%d) failed, stopping', poll_index)
+      return
+
+    # Compute time range from watermark
+    if current_wm is not None:
+      start_ts = current_wm.micros / 1e6
+    else:
+      start_ts = self._start_time
+    end_ts = now - self._buffer_sec
 
     _LOGGER.warning(
         '[Stage1-Poll] Time range: start_ts=%.1f (%s), end_ts=%.1f (%s), '
@@ -583,49 +699,58 @@ class _PollChangeHistoryFn(beam.DoFn):
                                         tz=datetime.timezone.utc).isoformat(),
         self._buffer_sec)
 
-    if end_ts <= start_ts:
+    if end_ts > start_ts:
+      ranges = compute_ranges(start_ts, end_ts, self._change_function)
       _LOGGER.warning(
-          '[Stage1-Poll] No new data to poll: end_ts=%.1f <= start_ts=%.1f, '
-          'skipping',
-          end_ts,
-          start_ts)
-      return
-
-    ranges = compute_ranges(start_ts, end_ts, self._change_function)
-    _LOGGER.warning(
-        '[Stage1-Poll] Polling %s: %d chunks covering [%s, %s)',
-        self._table,
-        len(ranges),
-        datetime.datetime.fromtimestamp(start_ts,
-                                        tz=datetime.timezone.utc).isoformat(),
-        datetime.datetime.fromtimestamp(end_ts,
-                                        tz=datetime.timezone.utc).isoformat())
-    Metrics.counter('BigQueryChangeHistory', 'polls').inc()
-
-    for chunk_idx, (chunk_start, chunk_end) in enumerate(ranges):
-      _LOGGER.warning(
-          '[Stage1-Poll] Executing chunk %d/%d: [%.1f, %.1f)',
-          chunk_idx + 1,
+          '[Stage1-Poll] Polling %s: %d chunks covering [%s, %s)',
+          self._table,
           len(ranges),
-          chunk_start,
-          chunk_end)
-      query_result = self._execute_query(chunk_start, chunk_end)
-      if query_result is not None:
+          datetime.datetime.fromtimestamp(start_ts,
+                                          tz=datetime.timezone.utc).isoformat(),
+          datetime.datetime.fromtimestamp(end_ts,
+                                          tz=datetime.timezone.utc).isoformat())
+      Metrics.counter('BigQueryChangeHistory', 'polls').inc()
+
+      for chunk_idx, (chunk_start, chunk_end) in enumerate(ranges):
         _LOGGER.warning(
-            '[Stage1-Poll] Chunk %d/%d produced _QueryResult: '
-            'temp_table=%s',
+            '[Stage1-Poll] Executing chunk %d/%d: [%.1f, %.1f)',
             chunk_idx + 1,
             len(ranges),
-            _table_key(query_result.temp_table_ref))
-        yield query_result
-      Metrics.counter('BigQueryChangeHistory', 'queries').inc()
+            chunk_start,
+            chunk_end)
+        query_result = self._execute_query(chunk_start, chunk_end)
+        if query_result is not None:
+          _LOGGER.warning(
+              '[Stage1-Poll] Chunk %d/%d produced _QueryResult: '
+              'temp_table=%s',
+              chunk_idx + 1,
+              len(ranges),
+              _table_key(query_result.temp_table_ref))
+          yield query_result
+        Metrics.counter('BigQueryChangeHistory', 'queries').inc()
 
+      # Advance watermark to end of queried range
+      _LOGGER.warning(
+          '[Stage1-Poll] Advancing watermark to %.1f (%s)',
+          end_ts,
+          datetime.datetime.fromtimestamp(end_ts,
+                                          tz=datetime.timezone.utc).isoformat())
+      watermark_estimator.set_watermark(Timestamp.of(end_ts))
+    else:
+      _LOGGER.warning(
+          '[Stage1-Poll] No new data to poll: end_ts=%.1f <= '
+          'start_ts=%.1f, skipping',
+          end_ts,
+          start_ts)
+
+    # Defer remainder — wake up after poll_interval_sec
+    next_poll = now + self._poll_interval_sec
     _LOGGER.warning(
-        '[Stage1-Poll] Updating state: last_end_ts=%.1f (%s)',
-        end_ts,
-        datetime.datetime.fromtimestamp(end_ts,
+        '[Stage1-Poll] Deferring remainder: next poll at %.1f (%s)',
+        next_poll,
+        datetime.datetime.fromtimestamp(next_poll,
                                         tz=datetime.timezone.utc).isoformat())
-    last_end_ts.add(end_ts)
+    restriction_tracker.defer_remainder(Timestamp.of(next_poll))
 
   def _execute_query(self, start_ts, end_ts):
     """Execute a CHANGES/APPENDS query and return _QueryResult."""
@@ -675,7 +800,7 @@ class _PollChangeHistoryFn(beam.DoFn):
 
     return _QueryResult(
         temp_table_ref=temp_table_ref,
-        total_streams=0,  # Set by SDF's initial_restriction
+        total_streams=0,  # Set by Stage 2's ReadSession
         range_end=end_ts)
 
 
@@ -763,45 +888,33 @@ class ReadBigQueryChangeHistory(beam.PTransform):
         start_time,
         self._stop_time)
 
-    # Stage 1: Poll for changes on interval
+    # Stage 1: Polling SDF — owns the polling loop and watermark
     _LOGGER.warning(
         '[ReadBigQueryChangeHistory] Wiring Stage 1: '
-        'PeriodicImpulse -> KeyForState -> PollChangeHistory')
+        'Create config -> PollChangeHistory SDF')
+    config = _PollConfig(
+        table=self._table,
+        project=project,
+        change_function=self._change_function,
+        buffer_sec=self._buffer_sec,
+        temp_dataset=self._temp_dataset,
+        start_time=start_time,
+        stop_time=self._stop_time,
+        poll_interval_sec=self._poll_interval_sec)
+
     query_results = (
         pbegin
-        | 'PeriodicImpulse' >> PeriodicImpulse(
-            start_timestamp=start_time,
-            stop_timestamp=self._stop_time,
-            fire_interval=self._poll_interval_sec,
-            apply_windowing=False)
-        | 'KeyForState' >>
-        beam.Map(lambda ts: ('__singleton__', ts)).with_output_types(
-            beam.typehints.Tuple[str, beam.typehints.Any])
+        | 'CreateConfig' >> beam.Create([config])
         | 'PollChangeHistory' >> beam.ParDo(
-            _PollChangeHistoryFn(
+            _PollChangeHistorySDF(
                 table=self._table,
                 project=project,
                 change_function=self._change_function,
                 buffer_sec=self._buffer_sec,
                 temp_dataset=self._temp_dataset,
-                start_time=start_time)))
-
-    # Force fusion break so Stage 2 can process elements while
-    # Stage 1 is still handling subsequent impulses.
-    query_results = query_results | 'FusionBreak' >> beam.Reshuffle()
-
-    # Diagnostic: log elements arriving at Stage 2 input
-    def _log_pre_sdf(element):
-      _LOGGER.warning(
-          '[PRE-SDF] Element arrived at Stage 2 input: '
-          'temp_table=%s.%s.%s, range_end=%.1f',
-          element.temp_table_ref.projectId,
-          element.temp_table_ref.datasetId,
-          element.temp_table_ref.tableId,
-          element.range_end)
-      return element
-
-    query_results = (query_results | 'LogPreSDF' >> beam.Map(_log_pre_sdf))
+                start_time=start_time,
+                stop_time=self._stop_time,
+                poll_interval_sec=self._poll_interval_sec)))
 
     # Stage 2: Read temp tables via Storage Read API
     _LOGGER.warning(
@@ -824,19 +937,5 @@ class ReadBigQueryChangeHistory(beam.PTransform):
             beam.typehints.Tuple[str, beam.typehints.Tuple[int, int]])
         | 'CleanupTempTables' >> beam.ParDo(_CleanupTempTablesFn()))
 
-    # Apply windowing so downstream consumers can use GBK/Combine.
-    # Rows are timestamped by change_timestamp; window into poll-interval
-    # sized fixed windows with an AfterWatermark trigger.
-    _LOGGER.warning(
-        '[ReadBigQueryChangeHistory] Applying FixedWindows(%d sec) '
-        'with AfterWatermark trigger',
-        self._poll_interval_sec)
-    rows = (
-        read_outputs['rows']
-        | 'WindowRows' >> beam.WindowInto(
-            FixedWindows(self._poll_interval_sec),
-            trigger=Repeatedly(AfterWatermark()),
-            accumulation_mode=AccumulationMode.DISCARDING))
-
     _LOGGER.warning('[ReadBigQueryChangeHistory] Pipeline wiring complete')
-    return rows
+    return read_outputs['rows']

@@ -10,7 +10,13 @@ Usage (terminal 1 — insert data):
       --project=dataflow-twest --dataset=cdc --table=ch_demo \
       --rows_per_batch=3 --interval_sec=5
 
-Usage (terminal 2 — Dataflow runner):
+Usage (terminal 2 — DirectRunner, for local testing):
+  python -m apache_beam.io.gcp.bigquery_change_history_pipeline \
+      --project=dataflow-twest --dataset=cdc --table=ch_demo \
+      --poll_interval_sec=30 --change_function=APPENDS \
+      --runner=DirectRunner
+
+Usage (terminal 2 — DataflowRunner):
   python -m apache_beam.io.gcp.bigquery_change_history_pipeline \
       --project=dataflow-twest --dataset=cdc --table=ch_demo \
       --poll_interval_sec=30 --change_function=APPENDS \
@@ -32,7 +38,6 @@ import apache_beam as beam
 from apache_beam.io.gcp.bigquery_change_history import ReadBigQueryChangeHistory
 from apache_beam.options.pipeline_options import GoogleCloudOptions
 from apache_beam.options.pipeline_options import PipelineOptions
-from apache_beam.options.pipeline_options import SetupOptions
 from apache_beam.options.pipeline_options import StandardOptions
 from apache_beam.options.pipeline_options import WorkerOptions
 
@@ -97,9 +102,11 @@ def main():
       type=int,
       default=10,
       help='Max Storage Read API streams per read')
-  # Dataflow-specific args
+  # Runner and Dataflow-specific args
   parser.add_argument(
-      '--runner', default='DataflowRunner', help='Pipeline runner')
+      '--runner',
+      default='DirectRunner',
+      help='Pipeline runner (DirectRunner or DataflowRunner)')
   parser.add_argument('--region', default='us-central1', help='Dataflow region')
   parser.add_argument(
       '--temp_location',
@@ -142,17 +149,19 @@ def main():
   options.view_as(StandardOptions).runner = args.runner
   options.view_as(StandardOptions).streaming = True
   options.view_as(GoogleCloudOptions).project = args.project
-  options.view_as(GoogleCloudOptions).region = args.region
-  if args.temp_location:
-    options.view_as(GoogleCloudOptions).temp_location = args.temp_location
-  if args.staging_location:
-    options.view_as(GoogleCloudOptions).staging_location = args.staging_location
-  if args.job_name:
-    options.view_as(GoogleCloudOptions).job_name = args.job_name
-  options.view_as(WorkerOptions).num_workers = args.num_workers
-  options.view_as(WorkerOptions).max_num_workers = args.max_num_workers
-  options.view_as(WorkerOptions).machine_type = args.machine_type
-  # options.view_as(SetupOptions).save_main_session = True
+
+  if args.runner == 'DataflowRunner':
+    options.view_as(GoogleCloudOptions).region = args.region
+    if args.temp_location:
+      options.view_as(GoogleCloudOptions).temp_location = args.temp_location
+    if args.staging_location:
+      options.view_as(
+          GoogleCloudOptions).staging_location = args.staging_location
+    if args.job_name:
+      options.view_as(GoogleCloudOptions).job_name = args.job_name
+    options.view_as(WorkerOptions).num_workers = args.num_workers
+    options.view_as(WorkerOptions).max_num_workers = args.max_num_workers
+    options.view_as(WorkerOptions).machine_type = args.machine_type
 
   with beam.Pipeline(options=options) as p:
     rows = (
