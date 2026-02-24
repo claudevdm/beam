@@ -469,15 +469,7 @@ class PollChangeHistorySDFTest(BigQueryChangeHistoryIntegrationBase):
 
     from apache_beam.io.gcp.bigquery_change_history import _PollConfig
 
-    config = _PollConfig(
-        table=table_str,
-        project=self.project,
-        change_function='APPENDS',
-        buffer_sec=0,
-        temp_dataset=self.temp_dataset,
-        start_time=start_time,
-        stop_time=time.time() + 5,
-        poll_interval_sec=60)
+    config = _PollConfig(start_time=start_time)
 
     poll_sdf = _PollChangeHistoryFn(
         table=table_str,
@@ -495,7 +487,12 @@ class PollChangeHistorySDFTest(BigQueryChangeHistoryIntegrationBase):
           | beam.Create([config])
           | beam.ParDo(poll_sdf)
           | beam.Reshuffle()
-          | beam.ParDo(_ExecuteQueryFn()))
+          | beam.ParDo(
+              _ExecuteQueryFn(
+                  table=table_str,
+                  project=self.project,
+                  change_function='APPENDS',
+                  temp_dataset=self.temp_dataset)))
 
       result_count = results | beam.combiners.Count.Globally()
       # Should produce at least 1 _QueryResult
@@ -549,15 +546,7 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
 
     from apache_beam.io.gcp.bigquery_change_history import _PollConfig
 
-    config = _PollConfig(
-        table=table_str,
-        project=self.project,
-        change_function='APPENDS',
-        buffer_sec=0,
-        temp_dataset=self.temp_dataset,
-        start_time=start_time,
-        stop_time=time.time() + 5,
-        poll_interval_sec=60)
+    config = _PollConfig(start_time=start_time)
 
     with TestPipeline() as p:
       # Stage 1a: Poll SDF emits _QueryRange
@@ -579,7 +568,12 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
       query_results = (
           query_ranges
           | 'CommitQueryRanges' >> beam.Reshuffle()
-          | 'ExecuteQueries' >> beam.ParDo(_ExecuteQueryFn())
+          | 'ExecuteQueries' >> beam.ParDo(
+              _ExecuteQueryFn(
+                  table=table_str,
+                  project=self.project,
+                  change_function='APPENDS',
+                  temp_dataset=self.temp_dataset))
           | 'CommitQueryResults' >> beam.Reshuffle())
 
       # Stage 2: Read via Storage Read API
