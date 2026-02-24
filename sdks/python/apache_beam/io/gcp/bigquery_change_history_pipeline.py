@@ -7,23 +7,23 @@ Use alongside bigquery_change_history_insert_data.py to test streaming.
 
 Usage (terminal 1 — insert data):
   python -m apache_beam.io.gcp.bigquery_change_history_insert_data \
-      --project=dataflow-twest --dataset=cdc --table=ch_demo \
+      --project=apache-beam-testing --dataset=cdc --table=ch_demo \
       --rows_per_batch=3 --interval_sec=5
 
 Usage (terminal 2 — DirectRunner, for local testing):
   python -m apache_beam.io.gcp.bigquery_change_history_pipeline \
-      --project=dataflow-twest --dataset=cdc --table=ch_demo \
+      --project=apache-beam-testing --dataset=cdc --table=ch_demo \
       --poll_interval_sec=30 --change_function=APPENDS \
       --runner=DirectRunner
 
 Usage (terminal 2 — DataflowRunner):
   python -m apache_beam.io.gcp.bigquery_change_history_pipeline \
-      --project=dataflow-twest --dataset=cdc --table=ch_demo \
+      --project=apache-beam-testing --dataset=cdc --table=ch_demo \
       --poll_interval_sec=30 --change_function=APPENDS \
       --runner=DataflowRunner \
       --region=us-central1 \
-      --temp_location=gs://dataflow-twest-temp/staging \
-      --staging_location=gs://dataflow-twest-temp/staging \
+      --temp_location=gs://apache-beam-testing-temp/staging \
+      --staging_location=gs://apache-beam-testing-temp/staging \
       --setup_file=./setup.py
 
 The pipeline will run until stop_time is reached (default: 5 minutes from now)
@@ -70,7 +70,7 @@ def main():
   parser = argparse.ArgumentParser(
       description='Run ReadBigQueryChangeHistory and print rows.')
   parser.add_argument(
-      '--project', default='dataflow-twest', help='GCP project ID')
+      '--project', default='apache-beam-testing', help='GCP project ID')
   parser.add_argument('--dataset', default='cdc', help='BigQuery dataset')
   parser.add_argument('--table', default='ch_demo', help='BigQuery table name')
   parser.add_argument(

@@ -294,7 +294,9 @@ def build_changes_query(
     end_ts,
     change_function,
     change_type_column='change_type',
-    change_timestamp_column='change_timestamp'):
+    change_timestamp_column='change_timestamp',
+    columns=None,
+    row_filter=None):
   """Build a CHANGES() or APPENDS() SQL query.
 
   Args:
@@ -305,6 +307,10 @@ def build_changes_query(
     change_type_column: Output column name for _CHANGE_TYPE pseudo-column.
     change_timestamp_column: Output column name for _CHANGE_TIMESTAMP
         pseudo-column.
+    columns: Optional list of column names to select. If None, selects all
+        columns. Pseudo-columns are always appended regardless.
+    row_filter: Optional SQL WHERE clause (without the WHERE keyword).
+        Applied after the CHANGES/APPENDS function.
 
   Returns:
     SQL string.
@@ -318,16 +324,20 @@ def build_changes_query(
   # Pseudo-columns (_CHANGE_TYPE, _CHANGE_TIMESTAMP) can't be written to
   # destination tables with their original names. Rename them so they can
   # be persisted to the temp table for Storage Read API reading.
-  pseudo_cols = '_CHANGE_TYPE, _CHANGE_TIMESTAMP'
-  sql = (
-      f"SELECT * EXCEPT({pseudo_cols}), "
+  pseudo = (
       f"_CHANGE_TYPE AS {change_type_column}, "
-      f"_CHANGE_TIMESTAMP AS {change_timestamp_column} "
+      f"_CHANGE_TIMESTAMP AS {change_timestamp_column}")
+  if columns is None:
+    select = f"SELECT * EXCEPT(_CHANGE_TYPE, _CHANGE_TIMESTAMP), {pseudo}"
+  else:
+    select = f"SELECT {', '.join(columns)}, {pseudo}"
+  from_clause = (
       f"FROM {change_function}"
       f"(TABLE `{table}`, "
       f"TIMESTAMP '{start_iso}', "
       f"TIMESTAMP '{end_iso}')")
-  return sql
+  where = f" WHERE {row_filter}" if row_filter else ""
+  return f"{select} {from_clause}{where}"
 
 
 def compute_ranges(start_ts, end_ts, change_function):
@@ -525,6 +535,8 @@ class _ExecuteQueryFn(beam.DoFn):
       location,
       change_type_column='change_type',
       change_timestamp_column='change_timestamp',
+      columns=None,
+      row_filter=None,
       trace=False):
     self._table = table
     self._project = project
@@ -533,6 +545,8 @@ class _ExecuteQueryFn(beam.DoFn):
     self._location = location
     self._change_type_column = change_type_column
     self._change_timestamp_column = change_timestamp_column
+    self._columns = columns
+    self._row_filter = row_filter
     self._trace = trace
 
   def _log(self, msg, *args):
@@ -563,7 +577,9 @@ class _ExecuteQueryFn(beam.DoFn):
         qr.chunk_end,
         self._change_function,
         self._change_type_column,
-        self._change_timestamp_column)
+        self._change_timestamp_column,
+        self._columns,
+        self._row_filter)
     temp_table_id = f'beam_ch_temp_{uuid.uuid4().hex[:8]}'
     job_id = f'beam_ch_{uuid.uuid4().hex[:12]}'
 
@@ -1008,6 +1024,13 @@ class ReadBigQueryChangeHistory(beam.PTransform):
         Change this if your source table already has a column named
         'change_timestamp'. This column is also used internally to
         extract event timestamps for watermark tracking.
+    columns: Optional list of column names to select from the source
+        table. If None (default), all columns are selected. The
+        pseudo-columns (change_type, change_timestamp) are always
+        included regardless of this setting.
+    row_filter: Optional SQL boolean expression used as a WHERE clause
+        on the CHANGES/APPENDS query. Do not include the WHERE keyword.
+        Example: ``'status = "active" AND region = "US"'``.
     batch_arrow_read: If True (default), convert Arrow RecordBatches in
         bulk using to_pydict() instead of per-cell .as_py() calls.
         This is 1.5x faster for large tables at the cost of ~2x peak
@@ -1028,6 +1051,8 @@ class ReadBigQueryChangeHistory(beam.PTransform):
       location=None,
       change_type_column='change_type',
       change_timestamp_column='change_timestamp',
+      columns=None,
+      row_filter=None,
       batch_arrow_read=True,
       trace=False):
     super().__init__()
@@ -1059,6 +1084,8 @@ class ReadBigQueryChangeHistory(beam.PTransform):
     self._location = location
     self._change_type_column = change_type_column
     self._change_timestamp_column = change_timestamp_column
+    self._columns = columns
+    self._row_filter = row_filter
     self._batch_arrow_read = batch_arrow_read
     self._trace = trace
 
@@ -1133,6 +1160,8 @@ class ReadBigQueryChangeHistory(beam.PTransform):
                 location=self._location,
                 change_type_column=self._change_type_column,
                 change_timestamp_column=self._change_timestamp_column,
+                columns=self._columns,
+                row_filter=self._row_filter,
                 trace=self._trace))
         | 'CommitQueryResults' >> beam.Reshuffle())
 

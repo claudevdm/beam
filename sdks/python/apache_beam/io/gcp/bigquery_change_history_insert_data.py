@@ -8,7 +8,7 @@ ReadBigQueryChangeHistory source.
 
 Usage:
   python -m apache_beam.io.gcp.bigquery_change_history_insert_data \
-      --project=dataflow-twest \
+      --project=apache-beam-testing \
       --dataset=cdc \
       --table=ch_demo \
       --rows_per_batch=3 \
@@ -22,7 +22,6 @@ with enable_change_history = true.
 import argparse
 import logging
 import random
-import sys
 import time
 import uuid
 
@@ -82,7 +81,7 @@ def main():
   parser = argparse.ArgumentParser(
       description='Insert rows periodically into a BQ change-history table.')
   parser.add_argument(
-      '--project', default='dataflow-twest', help='GCP project ID')
+      '--project', default='apache-beam-testing', help='GCP project ID')
   parser.add_argument('--dataset', default='cdc', help='BigQuery dataset')
   parser.add_argument('--table', default='ch_demo', help='BigQuery table name')
   parser.add_argument(

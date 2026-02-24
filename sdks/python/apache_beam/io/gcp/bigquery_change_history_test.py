@@ -23,7 +23,7 @@ Unit tests (no GCP):
   - _table_key conversion
   - ReadBigQueryChangeHistory validation
 
-Integration tests (real GCP, project=dataflow-twest, dataset=cdc):
+Integration tests (real GCP, project=apache-beam-testing, dataset=cdc):
   - Stage 3: cleanup DoFn deletes real temp tables
   - Stage 2: SDF reads real temp tables via Storage Read API
   - Stage 1: poll DoFn executes real APPENDS queries
@@ -56,8 +56,8 @@ from apache_beam.testing.util import equal_to
 _LOGGER = logging.getLogger(__name__)
 
 # GCP test configuration
-PROJECT = 'dataflow-twest'
-DATASET = 'cdc'
+PROJECT = 'apache-beam-testing'
+DATASET = 'bq-cdc'
 
 # =============================================================================
 # Unit Tests (no GCP dependencies)
@@ -87,6 +87,63 @@ class BuildChangesQueryTest(unittest.TestCase):
     sql = build_changes_query('proj.ds.tbl', ts_start, ts_end, 'CHANGES')
     self.assertIn('CHANGES', sql)
     self.assertIn('TABLE `proj.ds.tbl`', sql)
+
+  def test_columns_select(self):
+    ts_start = datetime.datetime(
+        2025, 1, 1, tzinfo=datetime.timezone.utc).timestamp()
+    ts_end = datetime.datetime(
+        2025, 1, 2, tzinfo=datetime.timezone.utc).timestamp()
+    sql = build_changes_query(
+        'proj.ds.tbl', ts_start, ts_end, 'APPENDS', columns=['col_a', 'col_b'])
+    self.assertIn('SELECT col_a, col_b, _CHANGE_TYPE AS', sql)
+    self.assertNotIn('EXCEPT', sql)
+
+  def test_columns_none_selects_all(self):
+    ts_start = datetime.datetime(
+        2025, 1, 1, tzinfo=datetime.timezone.utc).timestamp()
+    ts_end = datetime.datetime(
+        2025, 1, 2, tzinfo=datetime.timezone.utc).timestamp()
+    sql = build_changes_query(
+        'proj.ds.tbl', ts_start, ts_end, 'APPENDS', columns=None)
+    self.assertIn('SELECT * EXCEPT', sql)
+
+  def test_row_filter(self):
+    ts_start = datetime.datetime(
+        2025, 1, 1, tzinfo=datetime.timezone.utc).timestamp()
+    ts_end = datetime.datetime(
+        2025, 1, 2, tzinfo=datetime.timezone.utc).timestamp()
+    sql = build_changes_query(
+        'proj.ds.tbl',
+        ts_start,
+        ts_end,
+        'APPENDS',
+        row_filter='status = "active"')
+    self.assertIn('WHERE status = "active"', sql)
+
+  def test_no_row_filter(self):
+    ts_start = datetime.datetime(
+        2025, 1, 1, tzinfo=datetime.timezone.utc).timestamp()
+    ts_end = datetime.datetime(
+        2025, 1, 2, tzinfo=datetime.timezone.utc).timestamp()
+    sql = build_changes_query(
+        'proj.ds.tbl', ts_start, ts_end, 'APPENDS', row_filter=None)
+    self.assertNotIn('WHERE', sql)
+
+  def test_columns_and_row_filter(self):
+    ts_start = datetime.datetime(
+        2025, 1, 1, tzinfo=datetime.timezone.utc).timestamp()
+    ts_end = datetime.datetime(
+        2025, 1, 2, tzinfo=datetime.timezone.utc).timestamp()
+    sql = build_changes_query(
+        'proj.ds.tbl',
+        ts_start,
+        ts_end,
+        'CHANGES',
+        columns=['id', 'name'],
+        row_filter='id > 100')
+    self.assertIn('SELECT id, name, _CHANGE_TYPE AS', sql)
+    self.assertNotIn('EXCEPT', sql)
+    self.assertIn('WHERE id > 100', sql)
 
   def test_colon_normalized_to_dot(self):
     ts_start = datetime.datetime(
@@ -174,11 +231,9 @@ class ValidationTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       ReadBigQueryChangeHistory(table='p:d.t', poll_interval_sec=-1)
 
-  def test_default_buffer_changes(self):
+  def test_default_buffer(self):
     t = ReadBigQueryChangeHistory(table='p:d.t', change_function='CHANGES')
-    self.assertEqual(t._buffer_sec, 600)
-
-  def test_default_buffer_appends(self):
+    self.assertEqual(t._buffer_sec, 15)
     t = ReadBigQueryChangeHistory(table='p:d.t', change_function='APPENDS')
     self.assertEqual(t._buffer_sec, 15)
 
@@ -191,7 +246,7 @@ class ValidationTest(unittest.TestCase):
 class BigQueryChangeHistoryIntegrationBase(unittest.TestCase):
   """Base class for integration tests against real BigQuery.
 
-  Uses project=dataflow-twest, dataset=cdc.
+  Uses project=apache-beam-testing, dataset=cdc.
   Creates a unique temp dataset per test class for cleanup isolation.
   """
   @classmethod
@@ -492,7 +547,8 @@ class PollChangeHistorySDFTest(BigQueryChangeHistoryIntegrationBase):
                   table=table_str,
                   project=self.project,
                   change_function='APPENDS',
-                  temp_dataset=self.temp_dataset)))
+                  temp_dataset=self.temp_dataset,
+                  location=self.location)))
 
       result_count = results | beam.combiners.Count.Globally()
       # Should produce at least 1 _QueryResult
@@ -573,7 +629,8 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
                   table=table_str,
                   project=self.project,
                   change_function='APPENDS',
-                  temp_dataset=self.temp_dataset))
+                  temp_dataset=self.temp_dataset,
+                  location=self.location))
           | 'CommitQueryResults' >> beam.Reshuffle())
 
       # Stage 2: Read via Storage Read API
