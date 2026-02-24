@@ -128,7 +128,7 @@ def main():
       format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 
   table = f'{args.project}:{args.dataset}.{args.table}'
-  start_time = time.time() - 3600 - args.start_offset_sec
+  start_time = time.time() - args.start_offset_sec
   stop_time = time.time() + args.duration_sec
 
   _LOGGER.info('Starting ReadBigQueryChangeHistory pipeline')
@@ -170,6 +170,7 @@ def main():
             buffer_sec=args.buffer_sec,
             project=args.project,
             temp_dataset=args.temp_dataset,
+            batch_arrow_read=True,
             trace=True))
 
     # Log every row
