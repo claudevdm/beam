@@ -280,24 +280,6 @@ class _PollWatermarkEstimatorProvider(WatermarkEstimatorProvider):
     return _PollWatermarkEstimator(estimator_state)
 
 
-class _PollChangeHistoryRestrictionProvider(core.RestrictionProvider):
-  """Restriction provider for the unbounded polling SDF."""
-  def initial_restriction(self, element):
-    return OffsetRange(0, sys.maxsize)
-
-  def create_tracker(self, restriction):
-    return _NonSplittableOffsetTracker(restriction)
-
-  def restriction_size(self, element, restriction):
-    return 1
-
-  def split(self, element, restriction):
-    yield restriction
-
-  def truncate(self, element, restriction):
-    return None
-
-
 def _table_key(table_ref):
   """Convert a TableReference to a 'project.dataset.table' string."""
   return f'{table_ref.projectId}.{table_ref.datasetId}.{table_ref.tableId}'
@@ -379,7 +361,7 @@ def _max_default_zero(values):
 # =============================================================================
 
 
-class _PollChangeHistoryFn(beam.DoFn):
+class _PollChangeHistoryFn(beam.DoFn, beam.transforms.core.RestrictionProvider):
   """SDF that periodically emits _QueryRange instructions.
 
   Uses defer_remainder() for poll timing and ManualWatermarkEstimator to
@@ -429,12 +411,40 @@ class _PollChangeHistoryFn(beam.DoFn):
     if self._trace:
       _LOGGER.warning(msg, *args)
 
+  # -- Inline restriction provider methods --
+  # Defined on the DoFn (instead of a separate RestrictionProvider) so that
+  # create_tracker() can access self._stop_time and return an empty-range
+  # tracker when stop_time has passed — terminating the SDF.
+
+  def initial_restriction(self, element):
+    return OffsetRange(0, sys.maxsize)
+
+  def create_tracker(self, restriction):
+    # When stop_time has passed, return an empty-range tracker so
+    # try_claim() fails immediately and check_done() passes (empty range).
+    # This terminates the SDF instead of deferring forever.
+    if self._stop_time != MAX_TIMESTAMP and time.time() >= self._stop_time:
+      self._log(
+          '[Stage1-Poll] create_tracker: stop_time reached, '
+          'returning empty range to terminate SDF')
+      return _NonSplittableOffsetTracker(
+          OffsetRange(restriction.start, restriction.start))
+    return _NonSplittableOffsetTracker(restriction)
+
+  def restriction_size(self, element, restriction):
+    return 1
+
+  def split(self, element, restriction):
+    yield restriction
+
+  def truncate(self, element, restriction):
+    return None
+
   @beam.DoFn.unbounded_per_element()
   def process(
       self,
       element,
-      restriction_tracker=beam.DoFn.RestrictionParam(
-          _PollChangeHistoryRestrictionProvider()),
+      restriction_tracker=beam.DoFn.RestrictionParam(),
       watermark_estimator=beam.DoFn.WatermarkEstimatorParam(
           _PollWatermarkEstimatorProvider())):
     assert isinstance(restriction_tracker, sdf_utils.RestrictionTrackerView)
