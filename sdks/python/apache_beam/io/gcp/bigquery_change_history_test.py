@@ -531,7 +531,6 @@ class PollChangeHistorySDFTest(BigQueryChangeHistoryIntegrationBase):
         project=self.project,
         change_function='APPENDS',
         buffer_sec=0,
-        temp_dataset=self.temp_dataset,
         start_time=start_time,
         stop_time=time.time() + 5,
         poll_interval_sec=60)
@@ -615,7 +614,6 @@ class EndToEndStreamingTest(BigQueryChangeHistoryIntegrationBase):
                   project=self.project,
                   change_function='APPENDS',
                   buffer_sec=0,
-                  temp_dataset=self.temp_dataset,
                   start_time=start_time,
                   stop_time=time.time() + 5,
                   poll_interval_sec=60)))

@@ -89,6 +89,12 @@ _CLEANUP_TAG = 'cleanup'
 # The server may return fewer streams if the table is small.
 _DEFAULT_MAX_STREAMS = 10
 
+# Default table expiration for auto-created temp datasets: 24 hours in ms.
+# Tables created in the dataset auto-expire after this duration if not
+# explicitly deleted, acting as a safety net for orphaned temp tables
+# (e.g. pipeline crash before cleanup runs).
+_DEFAULT_TABLE_EXPIRATION_MS = 24 * 60 * 60 * 1000
+
 # =============================================================================
 # Helpers and data classes
 # =============================================================================
@@ -412,7 +418,6 @@ class _PollChangeHistoryFn(beam.DoFn, beam.transforms.core.RestrictionProvider):
       project,
       change_function,
       buffer_sec,
-      temp_dataset,
       start_time,
       stop_time,
       poll_interval_sec,
@@ -422,7 +427,6 @@ class _PollChangeHistoryFn(beam.DoFn, beam.transforms.core.RestrictionProvider):
     self._project = project
     self._change_function = change_function
     self._buffer_sec = buffer_sec
-    self._temp_dataset = temp_dataset
     self._start_time = start_time
     self._stop_time = stop_time
     self._poll_interval_sec = poll_interval_sec
@@ -564,8 +568,38 @@ class _ExecuteQueryFn(beam.DoFn):
           '[Stage1-Query] Inferred location=%s from source table %s',
           self._location,
           self._table)
-    self._bq_wrapper.get_or_create_dataset(
-        self._project, self._temp_dataset, location=self._location)
+    self._get_or_create_temp_dataset()
+
+  def _get_or_create_temp_dataset(self):
+    """Create the temp dataset if it doesn't exist.
+
+    Sets defaultTableExpirationMs so orphaned temp tables are automatically
+    garbage-collected by BigQuery if the pipeline crashes before cleanup.
+    """
+    try:
+      self._bq_wrapper.client.datasets.Get(
+          bigquery.BigqueryDatasetsGetRequest(
+              projectId=self._project, datasetId=self._temp_dataset))
+      self._log(
+          '[Stage1-Query] Temp dataset %s.%s already exists',
+          self._project,
+          self._temp_dataset)
+    except Exception:
+      self._log(
+          '[Stage1-Query] Creating temp dataset %s.%s with '
+          '24h table expiration, location=%s',
+          self._project,
+          self._temp_dataset,
+          self._location)
+      dataset = bigquery.Dataset(
+          datasetReference=bigquery.DatasetReference(
+              projectId=self._project, datasetId=self._temp_dataset))
+      if self._location is not None:
+        dataset.location = self._location
+      dataset.defaultTableExpirationMs = _DEFAULT_TABLE_EXPIRATION_MS
+      self._bq_wrapper.client.datasets.Insert(
+          bigquery.BigqueryDatasetsInsertRequest(
+              projectId=self._project, dataset=dataset))
 
   def process(self, qr):
     """Execute the BQ query described by a _QueryRange and yield _QueryResult.
@@ -1012,7 +1046,11 @@ class ReadBigQueryChangeHistory(beam.PTransform):
     change_function: 'CHANGES' or 'APPENDS'. Default 'APPENDS'.
     buffer_sec: Safety buffer in seconds behind now(). Default 15.
     project: GCP project ID. Default: from pipeline options.
-    temp_dataset: Dataset for temp tables. Default 'beam_ch_temp'.
+    temp_dataset: Dataset for temp tables. If None (default), a
+        per-pipeline dataset is auto-created with a 24-hour table
+        expiration as a safety net for orphaned tables. Set this to
+        use an existing dataset (e.g. if your service account lacks
+        bigquery.datasets.create permission).
     location: BigQuery geographic location for query jobs and temp
         dataset (e.g. 'US', 'us-central1'). If None (default), inferred
         from the source table.
@@ -1047,7 +1085,7 @@ class ReadBigQueryChangeHistory(beam.PTransform):
       change_function='APPENDS',
       buffer_sec=15,
       project=None,
-      temp_dataset='beam_ch_temp',
+      temp_dataset=None,
       location=None,
       change_type_column='change_type',
       change_timestamp_column='change_timestamp',
@@ -1107,6 +1145,10 @@ class ReadBigQueryChangeHistory(beam.PTransform):
     start_time = self._start_time or time.time()
     stop_time = self._stop_time or MAX_TIMESTAMP
 
+    temp_dataset = self._temp_dataset
+    if temp_dataset is None:
+      temp_dataset = f'beam_ch_temp_{uuid.uuid4().hex[:12]}'
+
     self._log(
         '[ReadBigQueryChangeHistory] expand: table=%s, project=%s, '
         'change_function=%s, poll_interval=%d sec, buffer=%d sec, '
@@ -1116,7 +1158,7 @@ class ReadBigQueryChangeHistory(beam.PTransform):
         self._change_function,
         self._poll_interval_sec,
         self._buffer_sec,
-        self._temp_dataset,
+        temp_dataset,
         _utc(start_time),
         _utc(stop_time) if stop_time != MAX_TIMESTAMP else 'INF')
 
@@ -1136,7 +1178,6 @@ class ReadBigQueryChangeHistory(beam.PTransform):
                 project=project,
                 change_function=self._change_function,
                 buffer_sec=self._buffer_sec,
-                temp_dataset=self._temp_dataset,
                 start_time=start_time,
                 stop_time=stop_time,
                 poll_interval_sec=self._poll_interval_sec,
@@ -1156,7 +1197,7 @@ class ReadBigQueryChangeHistory(beam.PTransform):
                 table=self._table,
                 project=project,
                 change_function=self._change_function,
-                temp_dataset=self._temp_dataset,
+                temp_dataset=temp_dataset,
                 location=self._location,
                 change_type_column=self._change_type_column,
                 change_timestamp_column=self._change_timestamp_column,
