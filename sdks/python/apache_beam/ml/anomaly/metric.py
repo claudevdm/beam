@@ -27,8 +27,7 @@ Example usage::
   from apache_beam.ml.anomaly.metric import (
       MetricSpec, AggregationSpec, WindowSpec, MeasureSpec,
       DerivedField, WindowType, AggOp, ComputeMetric)
-  from apache_beam.ml.anomaly.safe_eval import (
-      FieldRef, Literal, Div, Eq, IfExpr)
+  from apache_beam.ml.anomaly.safe_eval import Expr
   from apache_beam.ml.anomaly.transforms import AnomalyDetection
   from apache_beam.ml.anomaly.detectors.zscore import ZScore
 
@@ -55,7 +54,7 @@ Example usage::
               MeasureSpec(field='*', op=AggOp.COUNT, alias='impressions'),
           ],
       ),
-      metric_expr=Div(FieldRef('clicks'), FieldRef('impressions')),
+      metric_expr=Expr.from_string("clicks / impressions"),
   )
 
   # CUJ 3: Success rate with derived field
@@ -64,9 +63,8 @@ Example usage::
       derived_fields=[
           DerivedField(
               name='is_success',
-              expression=IfExpr(
-                  Eq(FieldRef('status'), Literal('success')),
-                  Literal(1), Literal(0))),
+              expression=Expr.from_string(
+                  "1 if status == 'success' else 0")),
       ],
       aggregation=AggregationSpec(
           window=WindowSpec(type=WindowType.FIXED, size_sec=86400),
@@ -76,7 +74,7 @@ Example usage::
               MeasureSpec(field='*', op=AggOp.COUNT, alias='total'),
           ],
       ),
-      metric_expr=Div(FieldRef('successes'), FieldRef('total')),
+      metric_expr=Expr.from_string("successes / total"),
   )
 """
 
@@ -217,6 +215,14 @@ class MetricSpec:
       raise TypeError(
           f"metric_expr must be an Expr, "
           f"got {type(self.metric_expr).__name__}")
+    # Validate that metric_expr only references known measure aliases.
+    if self.metric_expr is not None:
+      aliases = {m.alias for m in agg.measures}
+      unknown = self.metric_expr.field_refs() - aliases
+      if unknown:
+        raise ValueError(
+            f"metric_expr references unknown fields: {unknown}. "
+            f"Available measure aliases: {aliases}")
 
   def to_dict(self):
     """Serialize to a plain dict suitable for JSON."""
@@ -237,21 +243,33 @@ class MetricSpec:
     }
     if self.derived_fields:
       result['derived_fields'] = [{
-          'name': df.name, 'expression': df.expression.to_dict()
+          'name': df.name, 'expression': str(df.expression)
       } for df in self.derived_fields]
     if self.metric_expr is not None:
-      result['metric_expr'] = self.metric_expr.to_dict()
+      result['metric_expr'] = str(self.metric_expr)
     return result
 
   @classmethod
   def from_dict(cls, d):
     """Construct a MetricSpec from a plain dict (e.g., loaded from JSON).
 
+    Expressions (``metric_expr`` and ``derived_fields[].expression``) are
+    Python expression strings, e.g.::
+
+      "metric_expr": "clicks / impressions"
+      "expression": "1 if status == 'success' else 0"
+
     Args:
       d: Dictionary with keys matching the MetricSpec constructor.
 
     Returns:
       MetricSpec instance.
+
+    Raises:
+      TypeError: If an expression is not a string.
+      SyntaxError: If an expression string is not valid Python syntax.
+      ValueError: If an expression uses unsupported constructs, or if
+        metric_expr references fields not in the measure aliases.
     """
     agg_dict = d['aggregation']
     window_dict = agg_dict.get('window', {})
@@ -266,14 +284,26 @@ class MetricSpec:
     ]
     derived_fields = None
     if 'derived_fields' in d and d['derived_fields']:
-      derived_fields = [
-          DerivedField(
-              name=df['name'], expression=Expr.from_dict(df['expression']))
-          for df in d['derived_fields']
-      ]
+      derived_fields = []
+      for df in d['derived_fields']:
+        expr_val = df['expression']
+        if not isinstance(expr_val, str):
+          raise TypeError(
+              f"derived_fields[].expression must be a string, "
+              f"got {type(expr_val).__name__}. "
+              f"Example: \"1 if status == 'success' else 0\"")
+        derived_fields.append(
+            DerivedField(
+                name=df['name'], expression=Expr.from_string(expr_val)))
     metric_expr = None
     if 'metric_expr' in d and d['metric_expr'] is not None:
-      metric_expr = Expr.from_dict(d['metric_expr'])
+      expr_val = d['metric_expr']
+      if not isinstance(expr_val, str):
+        raise TypeError(
+            f"metric_expr must be a string, "
+            f"got {type(expr_val).__name__}. "
+            f"Example: \"clicks / impressions\"")
+      metric_expr = Expr.from_string(expr_val)
     return cls(
         name=d['name'],
         aggregation=AggregationSpec(

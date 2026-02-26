@@ -42,12 +42,11 @@ class FieldRefTest(unittest.TestCase):
     with self.assertRaises(KeyError):
       expr.evaluate({'amount': 42.0})
 
-  def test_to_dict(self):
-    self.assertEqual(FieldRef('x').to_dict(), {'type': 'field', 'name': 'x'})
+  def test_field_refs(self):
+    self.assertEqual(FieldRef('x').field_refs(), {'x'})
 
-  def test_from_dict(self):
-    expr = Expr.from_dict({'type': 'field', 'name': 'x'})
-    self.assertEqual(expr, FieldRef('x'))
+  def test_str(self):
+    self.assertEqual(str(FieldRef('clicks')), 'clicks')
 
 
 class LiteralTest(unittest.TestCase):
@@ -60,12 +59,14 @@ class LiteralTest(unittest.TestCase):
   def test_string(self):
     self.assertEqual(Literal('hello').evaluate({}), 'hello')
 
-  def test_to_dict(self):
-    self.assertEqual(Literal(5).to_dict(), {'type': 'literal', 'value': 5})
+  def test_field_refs(self):
+    self.assertEqual(Literal(5).field_refs(), set())
 
-  def test_from_dict(self):
-    expr = Expr.from_dict({'type': 'literal', 'value': 42})
-    self.assertEqual(expr, Literal(42))
+  def test_str_int(self):
+    self.assertEqual(str(Literal(42)), '42')
+
+  def test_str_string(self):
+    self.assertEqual(str(Literal('hello')), "'hello'")
 
 
 class BinOpTest(unittest.TestCase):
@@ -115,34 +116,13 @@ class BinOpTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       BinOp('**', FieldRef('a'), FieldRef('b'))
 
-  def test_to_dict(self):
-    expr = Add(FieldRef('a'), Literal(1))
-    self.assertEqual(
-        expr.to_dict(),
-        {
-            'type': 'bin_op',
-            'op': '+',
-            'left': {
-                'type': 'field', 'name': 'a'
-            },
-            'right': {
-                'type': 'literal', 'value': 1
-            },
-        })
+  def test_field_refs(self):
+    expr = Div(FieldRef('clicks'), FieldRef('impressions'))
+    self.assertEqual(expr.field_refs(), {'clicks', 'impressions'})
 
-  def test_from_dict(self):
-    d = {
-        'type': 'bin_op',
-        'op': '/',
-        'left': {
-            'type': 'field', 'name': 'a'
-        },
-        'right': {
-            'type': 'field', 'name': 'b'
-        },
-    }
-    expr = Expr.from_dict(d)
-    self.assertEqual(expr, Div(FieldRef('a'), FieldRef('b')))
+  def test_str(self):
+    expr = Div(FieldRef('clicks'), FieldRef('impressions'))
+    self.assertEqual(str(expr), '(clicks / impressions)')
 
 
 class CompareTest(unittest.TestCase):
@@ -168,34 +148,9 @@ class CompareTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       Compare('===', FieldRef('a'), Literal(1))
 
-  def test_to_dict(self):
-    expr = Eq(FieldRef('x'), Literal(1))
-    self.assertEqual(
-        expr.to_dict(),
-        {
-            'type': 'compare',
-            'op': '==',
-            'left': {
-                'type': 'field', 'name': 'x'
-            },
-            'right': {
-                'type': 'literal', 'value': 1
-            },
-        })
-
-  def test_from_dict(self):
-    d = {
-        'type': 'compare',
-        'op': '==',
-        'left': {
-            'type': 'field', 'name': 'status'
-        },
-        'right': {
-            'type': 'literal', 'value': 'success'
-        },
-    }
-    expr = Expr.from_dict(d)
-    self.assertEqual(expr, Eq(FieldRef('status'), Literal('success')))
+  def test_field_refs(self):
+    expr = Eq(FieldRef('status'), Literal('success'))
+    self.assertEqual(expr.field_refs(), {'status'})
 
 
 class IfExprTest(unittest.TestCase):
@@ -226,54 +181,12 @@ class IfExprTest(unittest.TestCase):
     self.assertEqual(expr.evaluate({'a': 15, 'b': 3}), 2)
     self.assertEqual(expr.evaluate({'a': 5, 'b': 7}), 1)
 
-  def test_to_dict(self):
-    expr = IfExpr(Eq(FieldRef('x'), Literal(1)), Literal(10), Literal(0))
-    self.assertEqual(
-        expr.to_dict(),
-        {
-            'type': 'if',
-            'condition': {
-                'type': 'compare',
-                'op': '==',
-                'left': {
-                    'type': 'field', 'name': 'x'
-                },
-                'right': {
-                    'type': 'literal', 'value': 1
-                }
-            },
-            'true_value': {
-                'type': 'literal', 'value': 10
-            },
-            'false_value': {
-                'type': 'literal', 'value': 0
-            },
-        })
-
-  def test_from_dict(self):
-    d = {
-        'type': 'if',
-        'condition': {
-            'type': 'compare',
-            'op': '==',
-            'left': {
-                'type': 'field', 'name': 'status'
-            },
-            'right': {
-                'type': 'literal', 'value': 'success'
-            }
-        },
-        'true_value': {
-            'type': 'literal', 'value': 1
-        },
-        'false_value': {
-            'type': 'literal', 'value': 0
-        },
-    }
-    expr = Expr.from_dict(d)
-    expected = IfExpr(
-        Eq(FieldRef('status'), Literal('success')), Literal(1), Literal(0))
-    self.assertEqual(expr, expected)
+  def test_field_refs(self):
+    expr = IfExpr(
+        Eq(FieldRef('status'), Literal('success')),
+        FieldRef('amount'),
+        Literal(0))
+    self.assertEqual(expr.field_refs(), {'status', 'amount'})
 
 
 class NegateTest(unittest.TestCase):
@@ -281,53 +194,132 @@ class NegateTest(unittest.TestCase):
     expr = Negate(FieldRef('a'))
     self.assertEqual(expr.evaluate({'a': 5}), -5)
 
-  def test_to_from_dict(self):
-    expr = Negate(Literal(3))
-    d = expr.to_dict()
-    self.assertEqual(
-        d, {
-            'type': 'negate', 'operand': {
-                'type': 'literal', 'value': 3
-            }
-        })
-    self.assertEqual(Expr.from_dict(d), expr)
+  def test_field_refs(self):
+    self.assertEqual(Negate(FieldRef('a')).field_refs(), {'a'})
+
+
+class FromStringTest(unittest.TestCase):
+  """Tests for Expr.from_string() — Python expression parsing."""
+  def test_field_ref(self):
+    expr = Expr.from_string("clicks")
+    self.assertEqual(expr, FieldRef('clicks'))
+
+  def test_int_literal(self):
+    expr = Expr.from_string("42")
+    self.assertEqual(expr, Literal(42))
+
+  def test_float_literal(self):
+    expr = Expr.from_string("3.14")
+    self.assertEqual(expr, Literal(3.14))
+
+  def test_string_literal(self):
+    expr = Expr.from_string("'success'")
+    self.assertEqual(expr, Literal('success'))
+
+  def test_division(self):
+    expr = Expr.from_string("clicks / impressions")
+    self.assertEqual(expr, Div(FieldRef('clicks'), FieldRef('impressions')))
+
+  def test_addition(self):
+    expr = Expr.from_string("a + b")
+    self.assertEqual(expr, Add(FieldRef('a'), FieldRef('b')))
+
+  def test_subtraction(self):
+    expr = Expr.from_string("a - 3")
+    self.assertEqual(expr, Sub(FieldRef('a'), Literal(3)))
+
+  def test_multiplication(self):
+    expr = Expr.from_string("a * b")
+    self.assertEqual(expr, Mul(FieldRef('a'), FieldRef('b')))
+
+  def test_floor_div(self):
+    expr = Expr.from_string("a // b")
+    self.assertEqual(expr, BinOp('//', FieldRef('a'), FieldRef('b')))
+
+  def test_modulo(self):
+    expr = Expr.from_string("a % 3")
+    self.assertEqual(expr, BinOp('%', FieldRef('a'), Literal(3)))
+
+  def test_comparison_eq(self):
+    expr = Expr.from_string("status == 'success'")
+    self.assertEqual(expr, Eq(FieldRef('status'), Literal('success')))
+
+  def test_comparison_gt(self):
+    expr = Expr.from_string("a > 5")
+    self.assertEqual(expr, Gt(FieldRef('a'), Literal(5)))
+
+  def test_negation(self):
+    expr = Expr.from_string("-a")
+    self.assertEqual(expr, Negate(FieldRef('a')))
+
+  def test_if_else(self):
+    expr = Expr.from_string("1 if status == 'success' else 0")
+    expected = IfExpr(
+        Eq(FieldRef('status'), Literal('success')), Literal(1), Literal(0))
+    self.assertEqual(expr, expected)
+
+  def test_parenthesized(self):
+    expr = Expr.from_string("(a + b) / c")
+    expected = Div(Add(FieldRef('a'), FieldRef('b')), FieldRef('c'))
+    self.assertEqual(expr, expected)
+
+  def test_precedence(self):
+    # Python precedence: a + b * c = a + (b * c)
+    expr = Expr.from_string("a + b * c")
+    expected = Add(FieldRef('a'), Mul(FieldRef('b'), FieldRef('c')))
+    self.assertEqual(expr, expected)
+
+  def test_nested_if(self):
+    expr = Expr.from_string("3 if a > 10 else (2 if b > 5 else 1)")
+    self.assertEqual(expr.evaluate({'a': 15, 'b': 7}), 3)
+    self.assertEqual(expr.evaluate({'a': 15, 'b': 3}), 3)
+    self.assertEqual(expr.evaluate({'a': 5, 'b': 7}), 2)
+    self.assertEqual(expr.evaluate({'a': 5, 'b': 3}), 1)
+
+  def test_syntax_error(self):
+    with self.assertRaises(SyntaxError):
+      Expr.from_string("a +")
+
+  def test_unsupported_function_call(self):
+    with self.assertRaises(ValueError):
+      Expr.from_string("abs(a)")
+
+  def test_unsupported_attribute(self):
+    with self.assertRaises(ValueError):
+      Expr.from_string("a.b")
+
+  def test_unsupported_power(self):
+    with self.assertRaises(ValueError):
+      Expr.from_string("a ** 2")
+
+  def test_chained_comparison(self):
+    with self.assertRaises(ValueError):
+      Expr.from_string("a < b < c")
 
 
 class RoundTripTest(unittest.TestCase):
-  """Test that complex expressions survive to_dict/from_dict round-trips."""
+  """Test that complex expressions survive str/from_string round-trips."""
   def test_cuj2_ratio(self):
-    expr = Div(FieldRef('clicks'), FieldRef('impressions'))
-    self.assertEqual(Expr.from_dict(expr.to_dict()), expr)
+    expr = Expr.from_string("clicks / impressions")
+    roundtripped = Expr.from_string(str(expr))
+    self.assertEqual(roundtripped, expr)
 
   def test_cuj3_derived_field(self):
-    expr = IfExpr(
-        Eq(FieldRef('status'), Literal('success')), Literal(1), Literal(0))
-    self.assertEqual(Expr.from_dict(expr.to_dict()), expr)
+    expr = Expr.from_string("1 if status == 'success' else 0")
+    roundtripped = Expr.from_string(str(expr))
+    self.assertEqual(roundtripped, expr)
 
   def test_complex_nested(self):
-    # (a + b) / IF(c > 0, c, 1)
-    expr = Div(
-        Add(FieldRef('a'), FieldRef('b')),
-        IfExpr(Gt(FieldRef('c'), Literal(0)), FieldRef('c'), Literal(1)))
-    roundtripped = Expr.from_dict(expr.to_dict())
+    expr = Expr.from_string("(a + b) / (1 if c > 0 else 1)")
+    roundtripped = Expr.from_string(str(expr))
     self.assertEqual(roundtripped, expr)
-    # Also verify evaluation matches
     ctx = {'a': 10, 'b': 20, 'c': 5}
     self.assertEqual(expr.evaluate(ctx), roundtripped.evaluate(ctx))
 
-
-class FromDictErrorTest(unittest.TestCase):
-  def test_not_a_dict(self):
-    with self.assertRaises(ValueError):
-      Expr.from_dict("not a dict")
-
-  def test_missing_type(self):
-    with self.assertRaises(ValueError):
-      Expr.from_dict({'name': 'x'})
-
-  def test_unknown_type(self):
-    with self.assertRaises(ValueError):
-      Expr.from_dict({'type': 'unknown_node'})
+  def test_negation_roundtrip(self):
+    expr = Expr.from_string("-a")
+    roundtripped = Expr.from_string(str(expr))
+    self.assertEqual(roundtripped, expr)
 
 
 class MetricPatternTest(unittest.TestCase):
@@ -337,20 +329,19 @@ class MetricPatternTest(unittest.TestCase):
     pass
 
   def test_cuj2_ratio(self):
-    expr = Div(FieldRef('clicks'), FieldRef('impressions'))
+    expr = Expr.from_string("clicks / impressions")
     self.assertAlmostEqual(
         expr.evaluate({
             'clicks': 250.0, 'impressions': 10000.0
         }), 0.025)
 
   def test_cuj3_flag_derivation(self):
-    expr = IfExpr(
-        Eq(FieldRef('status'), Literal('success')), Literal(1), Literal(0))
+    expr = Expr.from_string("1 if status == 'success' else 0")
     self.assertEqual(expr.evaluate({'status': 'success'}), 1)
     self.assertEqual(expr.evaluate({'status': 'error'}), 0)
 
   def test_cuj3_ratio(self):
-    expr = Div(FieldRef('successes'), FieldRef('total'))
+    expr = Expr.from_string("successes / total")
     self.assertAlmostEqual(
         expr.evaluate({
             'successes': 920.0, 'total': 1000.0

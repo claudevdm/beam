@@ -17,28 +17,29 @@
 
 """Structured expression AST for safe metric computation.
 
-Provides expression tree nodes that can be constructed programmatically,
-serialized to/from JSON dicts, and evaluated against a field context.
+Provides expression tree nodes that can be constructed programmatically
+or parsed from Python expression strings, and evaluated against a field
+context.
 
 Example usage::
 
-  from apache_beam.ml.anomaly.safe_eval import (
-      FieldRef, Literal, Div, Add, Eq, IfExpr)
+  from apache_beam.ml.anomaly.safe_eval import Expr, FieldRef, Literal, Div
 
-  # clicks / impressions
-  expr = Div(FieldRef('clicks'), FieldRef('impressions'))
+  # Parse from string (preferred for JSON configs)
+  expr = Expr.from_string("clicks / impressions")
   result = expr.evaluate({'clicks': 50, 'impressions': 1000})
   # result = 0.05
 
-  # IF(status == 'success', 1, 0)
-  expr = IfExpr(
-      condition=Eq(FieldRef('status'), Literal('success')),
-      true_value=Literal(1),
-      false_value=Literal(0))
+  # Parse conditional expression
+  expr = Expr.from_string("1 if status == 'success' else 0")
   result = expr.evaluate({'status': 'success'})
   # result = 1
+
+  # Programmatic construction (for Python code)
+  expr = Div(FieldRef('clicks'), FieldRef('impressions'))
 """
 
+import ast
 import operator
 
 # --- Operator registries ---
@@ -61,6 +62,26 @@ _COMPARE_OPS = {
     '>=': operator.ge,
 }
 
+# --- AST mapping for from_string ---
+
+_AST_BINOP_MAP = {
+    ast.Add: '+',
+    ast.Sub: '-',
+    ast.Mult: '*',
+    ast.Div: '/',
+    ast.FloorDiv: '//',
+    ast.Mod: '%',
+}
+
+_AST_CMPOP_MAP = {
+    ast.Eq: '==',
+    ast.NotEq: '!=',
+    ast.Lt: '<',
+    ast.LtE: '<=',
+    ast.Gt: '>',
+    ast.GtE: '>=',
+}
+
 # --- Base class ---
 
 
@@ -77,50 +98,36 @@ class Expr:
     """
     raise NotImplementedError
 
-  def to_dict(self):
-    """Serialize to a plain dict suitable for JSON."""
+  def field_refs(self):
+    """Return the set of field names referenced by this expression."""
     raise NotImplementedError
 
   @staticmethod
-  def from_dict(d):
-    """Deserialize an expression from a plain dict.
+  def from_string(text):
+    """Parse a Python expression string into an Expr tree.
+
+    Supports field references (bare names), literals (numbers, strings),
+    arithmetic (``+, -, *, /, //, %``), comparisons
+    (``==, !=, <, <=, >, >=``), unary negation, and ``if/else``.
+
+    Examples::
+
+      Expr.from_string("clicks / impressions")
+      Expr.from_string("1 if status == 'success' else 0")
+      Expr.from_string("(a + b) / total")
 
     Args:
-      d: Dict with a ``'type'`` key indicating the node type.
+      text: A Python expression string.
 
     Returns:
       An ``Expr`` instance.
+
+    Raises:
+      ValueError: If the expression uses unsupported Python constructs.
+      SyntaxError: If the string is not valid Python syntax.
     """
-    if not isinstance(d, dict):
-      raise ValueError(f"Expected dict, got {type(d).__name__}: {d}")
-
-    node_type = d.get('type')
-    if node_type is None:
-      raise ValueError(f"Expression dict missing 'type' key: {d}")
-
-    if node_type == 'field':
-      return FieldRef(d['name'])
-    elif node_type == 'literal':
-      return Literal(d['value'])
-    elif node_type == 'bin_op':
-      return BinOp(
-          op=d['op'],
-          left=Expr.from_dict(d['left']),
-          right=Expr.from_dict(d['right']))
-    elif node_type == 'compare':
-      return Compare(
-          op=d['op'],
-          left=Expr.from_dict(d['left']),
-          right=Expr.from_dict(d['right']))
-    elif node_type == 'if':
-      return IfExpr(
-          condition=Expr.from_dict(d['condition']),
-          true_value=Expr.from_dict(d['true_value']),
-          false_value=Expr.from_dict(d['false_value']))
-    elif node_type == 'negate':
-      return Negate(Expr.from_dict(d['operand']))
-    else:
-      raise ValueError(f"Unknown expression type: {node_type}")
+    tree = ast.parse(text, mode='eval')
+    return _ast_to_expr(tree.body)
 
 
 # --- Leaf nodes ---
@@ -142,8 +149,11 @@ class FieldRef(Expr):
           f"Available: {list(context.keys())}")
     return context[self.name]
 
-  def to_dict(self):
-    return {'type': 'field', 'name': self.name}
+  def field_refs(self):
+    return {self.name}
+
+  def __str__(self):
+    return self.name
 
   def __repr__(self):
     return f"FieldRef({self.name!r})"
@@ -164,8 +174,11 @@ class Literal(Expr):
   def evaluate(self, context):
     return self.value
 
-  def to_dict(self):
-    return {'type': 'literal', 'value': self.value}
+  def field_refs(self):
+    return set()
+
+  def __str__(self):
+    return repr(self.value)
 
   def __repr__(self):
     return f"Literal({self.value!r})"
@@ -189,8 +202,11 @@ class Negate(Expr):
   def evaluate(self, context):
     return -self.operand.evaluate(context)
 
-  def to_dict(self):
-    return {'type': 'negate', 'operand': self.operand.to_dict()}
+  def field_refs(self):
+    return self.operand.field_refs()
+
+  def __str__(self):
+    return f"(-{self.operand})"
 
   def __repr__(self):
     return f"Negate({self.operand!r})"
@@ -224,13 +240,11 @@ class BinOp(Expr):
     right_val = self.right.evaluate(context)
     return _BINARY_OPS[self.op](left_val, right_val)
 
-  def to_dict(self):
-    return {
-        'type': 'bin_op',
-        'op': self.op,
-        'left': self.left.to_dict(),
-        'right': self.right.to_dict(),
-    }
+  def field_refs(self):
+    return self.left.field_refs() | self.right.field_refs()
+
+  def __str__(self):
+    return f"({self.left} {self.op} {self.right})"
 
   def __repr__(self):
     return f"BinOp({self.op!r}, {self.left!r}, {self.right!r})"
@@ -263,13 +277,11 @@ class Compare(Expr):
     right_val = self.right.evaluate(context)
     return _COMPARE_OPS[self.op](left_val, right_val)
 
-  def to_dict(self):
-    return {
-        'type': 'compare',
-        'op': self.op,
-        'left': self.left.to_dict(),
-        'right': self.right.to_dict(),
-    }
+  def field_refs(self):
+    return self.left.field_refs() | self.right.field_refs()
+
+  def __str__(self):
+    return f"({self.left} {self.op} {self.right})"
 
   def __repr__(self):
     return f"Compare({self.op!r}, {self.left!r}, {self.right!r})"
@@ -302,13 +314,13 @@ class IfExpr(Expr):
     else:
       return self.false_value.evaluate(context)
 
-  def to_dict(self):
-    return {
-        'type': 'if',
-        'condition': self.condition.to_dict(),
-        'true_value': self.true_value.to_dict(),
-        'false_value': self.false_value.to_dict(),
-    }
+  def field_refs(self):
+    return (
+        self.condition.field_refs() | self.true_value.field_refs()
+        | self.false_value.field_refs())
+
+  def __str__(self):
+    return f"({self.true_value} if {self.condition} else {self.false_value})"
 
   def __repr__(self):
     return (
@@ -320,6 +332,58 @@ class IfExpr(Expr):
         isinstance(other, IfExpr) and self.condition == other.condition and
         self.true_value == other.true_value and
         self.false_value == other.false_value)
+
+
+# --- AST-to-Expr conversion ---
+
+
+def _ast_to_expr(node):
+  """Convert a Python AST node to an Expr tree."""
+  if isinstance(node, ast.Name):
+    return FieldRef(node.id)
+
+  if isinstance(node, ast.Constant):
+    if not isinstance(node.value, (int, float, str)):
+      raise ValueError(
+          f"Unsupported literal type: {type(node.value).__name__}. "
+          f"Only int, float, and str literals are supported.")
+    return Literal(node.value)
+
+  if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+    return Negate(_ast_to_expr(node.operand))
+
+  if isinstance(node, ast.BinOp):
+    op_str = _AST_BINOP_MAP.get(type(node.op))
+    if op_str is None:
+      raise ValueError(
+          f"Unsupported binary operator: {type(node.op).__name__}. "
+          f"Supported: +, -, *, /, //, %")
+    return BinOp(op_str, _ast_to_expr(node.left), _ast_to_expr(node.right))
+
+  if isinstance(node, ast.Compare):
+    if len(node.ops) != 1 or len(node.comparators) != 1:
+      raise ValueError(
+          "Chained comparisons not supported (e.g., a < b < c). "
+          "Use (a < b) and separate expressions instead.")
+    op_str = _AST_CMPOP_MAP.get(type(node.ops[0]))
+    if op_str is None:
+      raise ValueError(
+          f"Unsupported comparison: {type(node.ops[0]).__name__}. "
+          f"Supported: ==, !=, <, <=, >, >=")
+    return Compare(
+        op_str, _ast_to_expr(node.left), _ast_to_expr(node.comparators[0]))
+
+  if isinstance(node, ast.IfExp):
+    return IfExpr(
+        _ast_to_expr(node.test),
+        _ast_to_expr(node.body),
+        _ast_to_expr(node.orelse))
+
+  raise ValueError(
+      f"Unsupported expression: {ast.dump(node)}. "
+      f"Only field names, literals, arithmetic (+,-,*,/,//,%), "
+      f"comparisons (==,!=,<,<=,>,>=), negation, and "
+      f"if/else expressions are supported.")
 
 
 # --- Convenience constructors ---
@@ -345,36 +409,11 @@ def Div(left, right):
   return BinOp('/', left, right)
 
 
-def Mod(left, right):
-  """Create a modulo expression."""
-  return BinOp('%', left, right)
-
-
 def Eq(left, right):
   """Create an equality comparison."""
   return Compare('==', left, right)
 
 
-def Neq(left, right):
-  """Create a not-equal comparison."""
-  return Compare('!=', left, right)
-
-
 def Gt(left, right):
   """Create a greater-than comparison."""
   return Compare('>', left, right)
-
-
-def Lt(left, right):
-  """Create a less-than comparison."""
-  return Compare('<', left, right)
-
-
-def Gte(left, right):
-  """Create a greater-than-or-equal comparison."""
-  return Compare('>=', left, right)
-
-
-def Lte(left, right):
-  """Create a less-than-or-equal comparison."""
-  return Compare('<=', left, right)

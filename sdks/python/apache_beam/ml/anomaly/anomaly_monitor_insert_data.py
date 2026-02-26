@@ -64,7 +64,7 @@ Usage:
   python -m apache_beam.ml.anomaly.anomaly_monitor_pipeline \
       --project=dataflow-twest \
       --table='dataflow-twest:cdc.cuj2_ctr' \
-      --metric_spec='{"name":"ctr","aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["campaign_type","browser_version"],"measures":[{"field":"is_click","op":"SUM","alias":"clicks"},{"field":"*","op":"COUNT","alias":"impressions"}]},"metric_expr":{"type":"bin_op","op":"/","left":{"type":"field","name":"clicks"},"right":{"type":"field","name":"impressions"}}}' \
+      --metric_spec='{"name":"ctr","aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["campaign_type","browser_version"],"measures":[{"field":"is_click","op":"SUM","alias":"clicks"},{"field":"*","op":"COUNT","alias":"impressions"}]},"metric_expr":"clicks / impressions"}' \
       --detector_spec='{"type":"ZScore","config":{"features":["value"]}}' \
       --poll_interval_sec=30 --start_offset_sec=30 --duration_sec=980 \
       --runner=PrismRunner
@@ -80,8 +80,8 @@ Usage:
   python -m apache_beam.ml.anomaly.anomaly_monitor_pipeline \
       --project=dataflow-twest \
       --table='dataflow-twest:cdc.cuj3_success' \
-      --metric_spec='{"name":"success_rate","derived_fields":[{"name":"is_success","expression":{"type":"if","condition":{"type":"compare","op":"==","left":{"type":"field","name":"status"},"right":{"type":"literal","value":"success"}},"true_value":{"type":"literal","value":1},"false_value":{"type":"literal","value":0}}}],"aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["brand_name","category"],"measures":[{"field":"is_success","op":"SUM","alias":"successes"},{"field":"*","op":"COUNT","alias":"total"}]},"metric_expr":{"type":"bin_op","op":"/","left":{"type":"field","name":"successes"},"right":{"type":"field","name":"total"}}}' \
-      --detector_spec='{"type":"RobustZScore","config":{"features":["value"],"threshold_criterion":{"type":"FixedThreshold","config":{"cutoff":10}}}}'  \
+      --metric_spec='{"name":"success_rate","derived_fields":[{"name":"is_success","expression":"1 if status == '"'"'success'"'"' else 0"}],"aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["brand_name","category"],"measures":[{"field":"is_success","op":"SUM","alias":"successes"},{"field":"*","op":"COUNT","alias":"total"}]},"metric_expr":"successes / total"}' \
+      --detector_spec='{"type":"RobustZScore","config":{"features":["value"],"threshold_criterion":{"type":"FixedThreshold","config":{"cutoff":10}}}}' \
       --poll_interval_sec=30 --start_offset_sec=30 --duration_sec=980 \
       --runner=PrismRunner
 """

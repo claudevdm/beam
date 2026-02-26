@@ -36,8 +36,6 @@ from apache_beam.ml.anomaly.metric import MeasureSpec
 from apache_beam.ml.anomaly.metric import MetricSpec
 from apache_beam.ml.anomaly.metric import WindowSpec
 from apache_beam.ml.anomaly.metric import WindowType
-from apache_beam.ml.anomaly.safe_eval import Div
-from apache_beam.ml.anomaly.safe_eval import FieldRef
 from apache_beam.ml.anomaly.transforms import AnomalyDetection
 from apache_beam.options.pipeline_options import PipelineOptions
 
@@ -79,16 +77,7 @@ class ParseMetricSpecTest(unittest.TestCase):
                 },
             ],
         },
-        'metric_expr': {
-            'type': 'bin_op',
-            'op': '/',
-            'left': {
-                'type': 'field', 'name': 'clicks'
-            },
-            'right': {
-                'type': 'field', 'name': 'impressions'
-            },
-        },
+        'metric_expr': 'clicks / impressions',
     })
     spec = _parse_metric_spec(spec_json)
     self.assertEqual(spec.name, 'ctr')
@@ -105,25 +94,7 @@ class ParseMetricSpecTest(unittest.TestCase):
         'name': 'success_rate',
         'derived_fields': [{
             'name': 'is_success',
-            'expression': {
-                'type': 'if',
-                'condition': {
-                    'type': 'compare',
-                    'op': '==',
-                    'left': {
-                        'type': 'field', 'name': 'status'
-                    },
-                    'right': {
-                        'type': 'literal', 'value': 'success'
-                    },
-                },
-                'true_value': {
-                    'type': 'literal', 'value': 1
-                },
-                'false_value': {
-                    'type': 'literal', 'value': 0
-                },
-            },
+            'expression': "1 if status == 'success' else 0",
         }],
         'aggregation': {
             'window': {
@@ -139,16 +110,7 @@ class ParseMetricSpecTest(unittest.TestCase):
                 },
             ],
         },
-        'metric_expr': {
-            'type': 'bin_op',
-            'op': '/',
-            'left': {
-                'type': 'field', 'name': 'successes'
-            },
-            'right': {
-                'type': 'field', 'name': 'total'
-            },
-        },
+        'metric_expr': 'successes / total',
     })
     spec = _parse_metric_spec(spec_json)
     self.assertEqual(spec.name, 'success_rate')
@@ -336,16 +298,7 @@ class EndToEndPipelineTest(unittest.TestCase):
                 },
             ],
         },
-        'metric_expr': {
-            'type': 'bin_op',
-            'op': '/',
-            'left': {
-                'type': 'field', 'name': 'clicks'
-            },
-            'right': {
-                'type': 'field', 'name': 'impressions'
-            },
-        },
+        'metric_expr': 'clicks / impressions',
     })
     detector_json = json.dumps({
         'type': 'ZScore',
@@ -396,25 +349,7 @@ class EndToEndPipelineTest(unittest.TestCase):
         'name': 'success_rate',
         'derived_fields': [{
             'name': 'is_success',
-            'expression': {
-                'type': 'if',
-                'condition': {
-                    'type': 'compare',
-                    'op': '==',
-                    'left': {
-                        'type': 'field', 'name': 'status'
-                    },
-                    'right': {
-                        'type': 'literal', 'value': 'success'
-                    },
-                },
-                'true_value': {
-                    'type': 'literal', 'value': 1
-                },
-                'false_value': {
-                    'type': 'literal', 'value': 0
-                },
-            },
+            'expression': "1 if status == 'success' else 0",
         }],
         'aggregation': {
             'window': {
@@ -430,16 +365,7 @@ class EndToEndPipelineTest(unittest.TestCase):
                 },
             ],
         },
-        'metric_expr': {
-            'type': 'bin_op',
-            'op': '/',
-            'left': {
-                'type': 'field', 'name': 'successes'
-            },
-            'right': {
-                'type': 'field', 'name': 'total'
-            },
-        },
+        'metric_expr': 'successes / total',
     })
     detector_json = json.dumps({
         'type': 'ZScore',

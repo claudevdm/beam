@@ -62,7 +62,7 @@ Top-level ``metric_spec`` object::
       "name": "<metric_name>",
       "aggregation": { ... },           # required
       "derived_fields": [ ... ],         # optional, pre-aggregation
-      "metric_expr": { ... },            # optional (required if >1 measure)
+      "metric_expr": "<expression>",     # optional (required if >1 measure)
       "output_field": "value"            # optional, default "value"
     }
 
@@ -88,41 +88,37 @@ Aggregation operators (``op``): ``SUM``, ``COUNT``, ``MIN``, ``MAX``, ``MEAN``.
 For ``COUNT``, the ``field`` value is ignored (use ``"*"`` by convention)
 — it counts all rows in the group.
 
+Expressions
+-----------
+Both ``metric_expr`` and ``derived_fields[].expression`` are Python
+expression strings. Bare names are field references, and all standard
+Python expression syntax is supported:
+
+- Arithmetic: ``+``, ``-``, ``*``, ``/``, ``//``, ``%``
+- Comparisons: ``==``, ``!=``, ``<``, ``<=``, ``>``, ``>=``
+- Negation: ``-field``
+- Conditional: ``true_val if condition else false_val``
+- Grouping: parentheses for precedence
+
+``metric_expr`` references measure aliases and is validated at pipeline
+construction time.
+
 derived_fields
 --------------
 Computed before aggregation. Each entry creates a new column available to
 measures::
 
     "derived_fields": [
-      {
-        "name": "is_success",
-        "expression": {
-          "type": "if",
-          "condition": {"type": "compare", "op": "==",
-                        "left": {"type": "field", "name": "status"},
-                        "right": {"type": "literal", "value": "success"}},
-          "true_value": {"type": "literal", "value": 1},
-          "false_value": {"type": "literal", "value": 0}
-        }
-      }
+      {"name": "is_success", "expression": "1 if status == 'success' else 0"}
     ]
 
 metric_expr
 -----------
 Post-aggregation expression that combines measure aliases into a single
-value. Required when there are multiple measures (e.g., ratio metrics).
+value. Required when there are multiple measures (e.g., ratio metrics)::
 
-Expression types:
-
-- ``{"type": "field", "name": "<alias>"}`` — reference a measure alias
-- ``{"type": "literal", "value": <number|string>}`` — constant value
-- ``{"type": "bin_op", "op": <op>, "left": <expr>, "right": <expr>}``
-  where ``op`` is one of: ``+``, ``-``, ``*``, ``/``, ``//``, ``%``
-- ``{"type": "compare", "op": <op>, "left": <expr>, "right": <expr>}``
-  where ``op`` is one of: ``==``, ``!=``, ``<``, ``<=``, ``>``, ``>=``
-- ``{"type": "negate", "operand": <expr>}`` — unary negation
-- ``{"type": "if", "condition": <expr>, "true_value": <expr>,
-  "false_value": <expr>}`` — conditional expression
+    "metric_expr": "clicks / impressions"
+    "metric_expr": "(successes + partial) / total"
 
 
 detector_spec JSON Reference
@@ -191,12 +187,12 @@ Simple SUM metric with ZScore::
 
 Grouped ratio metric (CTR) with ZScore::
 
-    --metric_spec='{"name":"ctr","aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["campaign_type","browser_version"],"measures":[{"field":"is_click","op":"SUM","alias":"clicks"},{"field":"*","op":"COUNT","alias":"impressions"}]},"metric_expr":{"type":"bin_op","op":"/","left":{"type":"field","name":"clicks"},"right":{"type":"field","name":"impressions"}}}'
+    --metric_spec='{"name":"ctr","aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["campaign_type","browser_version"],"measures":[{"field":"is_click","op":"SUM","alias":"clicks"},{"field":"*","op":"COUNT","alias":"impressions"}]},"metric_expr":"clicks / impressions"}'
     --detector_spec='{"type":"ZScore","config":{"features":["value"]}}'
 
 Derived field + ratio + custom threshold::
 
-    --metric_spec='{"name":"success_rate","derived_fields":[{"name":"is_success","expression":{"type":"if","condition":{"type":"compare","op":"==","left":{"type":"field","name":"status"},"right":{"type":"literal","value":"success"}},"true_value":{"type":"literal","value":1},"false_value":{"type":"literal","value":0}}}],"aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["brand_name","category"],"measures":[{"field":"is_success","op":"SUM","alias":"successes"},{"field":"*","op":"COUNT","alias":"total"}]},"metric_expr":{"type":"bin_op","op":"/","left":{"type":"field","name":"successes"},"right":{"type":"field","name":"total"}}}'
+    --metric_spec='{"name":"success_rate","derived_fields":[{"name":"is_success","expression":"1 if status == \'success\' else 0"}],"aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["brand_name","category"],"measures":[{"field":"is_success","op":"SUM","alias":"successes"},{"field":"*","op":"COUNT","alias":"total"}]},"metric_expr":"successes / total"}'
     --detector_spec='{"type":"ZScore","config":{"features":["value"],"threshold_criterion":{"type":"FixedThreshold","config":{"cutoff":10}}}}'
 """
 
