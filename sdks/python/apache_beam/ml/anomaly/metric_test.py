@@ -32,12 +32,7 @@ from apache_beam.ml.anomaly.metric import MeasureSpec
 from apache_beam.ml.anomaly.metric import MetricSpec
 from apache_beam.ml.anomaly.metric import WindowSpec
 from apache_beam.ml.anomaly.metric import WindowType
-from apache_beam.ml.anomaly.safe_eval import Div
-from apache_beam.ml.anomaly.safe_eval import Eq
 from apache_beam.ml.anomaly.safe_eval import Expr
-from apache_beam.ml.anomaly.safe_eval import FieldRef
-from apache_beam.ml.anomaly.safe_eval import IfExpr
-from apache_beam.ml.anomaly.safe_eval import Literal
 
 # ---- Spec construction and validation tests ----
 
@@ -137,7 +132,7 @@ class MetricSpecSerializationTest(unittest.TestCase):
                 MeasureSpec(field='is_click', op=AggOp.SUM, alias='clicks'),
                 MeasureSpec(field='*', op=AggOp.COUNT, alias='impressions'),
             ]),
-        metric_expr=Div(FieldRef('clicks'), FieldRef('impressions')),
+        metric_expr=Expr.from_string('clicks / impressions'),
         _run_init=True)
     spec2 = self._round_trip(spec)
     self.assertEqual(spec2.name, 'ctr')
@@ -147,7 +142,7 @@ class MetricSpecSerializationTest(unittest.TestCase):
     self.assertEqual(len(spec2.aggregation.measures), 2)
     # Verify expression round-tripped
     self.assertAlmostEqual(
-        spec2.metric_expr.evaluate({
+        spec2.metric_expr({
             'clicks': 50, 'impressions': 1000
         }), 0.05)
 
@@ -157,10 +152,7 @@ class MetricSpecSerializationTest(unittest.TestCase):
         derived_fields=[
             DerivedField(
                 name='is_success',
-                expression=IfExpr(
-                    Eq(FieldRef('status'), Literal('success')),
-                    Literal(1),
-                    Literal(0)))
+                expression=Expr.from_string("1 if status == 'success' else 0"))
         ],
         aggregation=AggregationSpec(
             window=WindowSpec(type=WindowType.FIXED, size_sec=86400),
@@ -170,15 +162,15 @@ class MetricSpecSerializationTest(unittest.TestCase):
                     field='is_success', op=AggOp.SUM, alias='successes'),
                 MeasureSpec(field='*', op=AggOp.COUNT, alias='total'),
             ]),
-        metric_expr=Div(FieldRef('successes'), FieldRef('total')),
+        metric_expr=Expr.from_string('successes / total'),
         _run_init=True)
     spec2 = self._round_trip(spec)
     self.assertEqual(spec2.name, 'success_rate')
     self.assertEqual(len(spec2.derived_fields), 1)
     # Verify derived field expression round-tripped
     df_expr = spec2.derived_fields[0].expression
-    self.assertEqual(df_expr.evaluate({'status': 'success'}), 1)
-    self.assertEqual(df_expr.evaluate({'status': 'error'}), 0)
+    self.assertEqual(df_expr({'status': 'success'}), 1)
+    self.assertEqual(df_expr({'status': 'error'}), 0)
 
 
 # ---- Pipeline tests ----
@@ -243,7 +235,7 @@ class ComputeMetricCUJ2Test(unittest.TestCase):
                 MeasureSpec(field='is_click', op=AggOp.SUM, alias='clicks'),
                 MeasureSpec(field='*', op=AggOp.COUNT, alias='impressions'),
             ]),
-        metric_expr=Div(FieldRef('clicks'), FieldRef('impressions')),
+        metric_expr=Expr.from_string('clicks / impressions'),
         _run_init=True)
 
     with TestPipeline() as p:
@@ -292,10 +284,7 @@ class ComputeMetricCUJ3Test(unittest.TestCase):
         derived_fields=[
             DerivedField(
                 name='is_success',
-                expression=IfExpr(
-                    Eq(FieldRef('status'), Literal('success')),
-                    Literal(1),
-                    Literal(0)))
+                expression=Expr.from_string("1 if status == 'success' else 0"))
         ],
         aggregation=AggregationSpec(
             window=WindowSpec(type=WindowType.FIXED, size_sec=3600),
@@ -305,7 +294,7 @@ class ComputeMetricCUJ3Test(unittest.TestCase):
                     field='is_success', op=AggOp.SUM, alias='successes'),
                 MeasureSpec(field='*', op=AggOp.COUNT, alias='total'),
             ]),
-        metric_expr=Div(FieldRef('successes'), FieldRef('total')),
+        metric_expr=Expr.from_string('successes / total'),
         _run_init=True)
 
     with TestPipeline() as p:
@@ -381,7 +370,7 @@ class ComputeMetricMiscTest(unittest.TestCase):
                 MeasureSpec(field='latency', op=AggOp.MIN, alias='min_l'),
                 MeasureSpec(field='latency', op=AggOp.MAX, alias='max_l'),
             ]),
-        metric_expr=Div(FieldRef('max_l'), FieldRef('min_l')),
+        metric_expr=Expr.from_string('max_l / min_l'),
         _run_init=True)
 
     with TestPipeline() as p:

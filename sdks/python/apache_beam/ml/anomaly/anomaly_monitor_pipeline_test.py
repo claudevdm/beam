@@ -85,7 +85,7 @@ class ParseMetricSpecTest(unittest.TestCase):
         spec.aggregation.group_by, ['campaign_type', 'user_segment'])
     self.assertEqual(len(spec.aggregation.measures), 2)
     self.assertAlmostEqual(
-        spec.metric_expr.evaluate({
+        spec.metric_expr({
             'clicks': 50, 'impressions': 1000
         }), 0.05)
 

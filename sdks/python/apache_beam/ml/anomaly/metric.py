@@ -124,13 +124,12 @@ class WindowSpec:
 
 @dataclasses.dataclass(frozen=True)
 class DerivedField:
-  """Pre-aggregation column derivation via structured expression.
+  """Pre-aggregation column derivation via expression.
 
   Args:
     name: Name of the new field to create.
-    expression: An ``Expr`` tree, e.g.
-      ``IfExpr(Eq(FieldRef('status'), Literal('success')),
-      Literal(1), Literal(0))``.
+    expression: A compiled ``Expr`` callable, e.g.
+      ``Expr.from_string("1 if status == 'success' else 0")``.
   """
   name: str
   expression: Expr
@@ -432,16 +431,21 @@ class _MetricCombineFn(beam.CombineFn):
     }
 
 
-class _ApplyDerivedFields(beam.DoFn):
-  """DoFn that evaluates derived field expressions on each input dict."""
-  def __init__(self, derived_fields):
-    self._derived_fields = derived_fields
+class _DerivedFieldsFn:
+  """Callable that evaluates derived field expressions on each row dict.
 
-  def process(self, element):
-    row = dict(element)
-    for df in self._derived_fields:
-      row[df.name] = df.expression.evaluate(row)
-    yield row
+  Each derived field's ``expression`` is a compiled ``Expr`` callable.
+  This class is passed to ``beam.Map`` and is pickle-safe because ``Expr``
+  implements ``__reduce__``.
+  """
+  def __init__(self, derived_fields):
+    self._fields = [(df.name, df.expression) for df in derived_fields]
+
+  def __call__(self, row):
+    row = dict(row)
+    for name, expr in self._fields:
+      row[name] = expr(row)
+    return row
 
 
 class _ApplyMetricExpr(beam.DoFn):
@@ -458,7 +462,7 @@ class _ApplyMetricExpr(beam.DoFn):
       agg_dict = element
 
     if self._metric_expr is not None:
-      value = float(self._metric_expr.evaluate(agg_dict))
+      value = float(self._metric_expr(agg_dict))
     else:
       value = float(next(iter(agg_dict.values())))
 
@@ -495,8 +499,8 @@ class ComputeMetric(beam.PTransform):
 
     # Step 1: Apply derived fields
     if spec.derived_fields:
-      pcoll = pcoll | 'DerivedFields' >> beam.ParDo(
-          _ApplyDerivedFields(spec.derived_fields))
+      pcoll = pcoll | 'DerivedFields' >> beam.Map(
+          _DerivedFieldsFn(spec.derived_fields))
 
     # Step 2: Apply windowing
     if agg.window.type == WindowType.FIXED:
