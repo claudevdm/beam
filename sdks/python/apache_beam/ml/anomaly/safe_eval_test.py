@@ -194,7 +194,7 @@ class SerializationTest(unittest.TestCase):
 class MetricPatternTest(unittest.TestCase):
   """Tests for the specific expression patterns used in the three CUJs."""
   def test_cuj1_no_expression_needed(self):
-    # CUJ 1 uses a single measure, no metric_expr
+    # CUJ 1 uses a single measure, no measure_combiner
     pass
 
   def test_cuj2_ratio(self):

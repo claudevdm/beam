@@ -27,7 +27,7 @@ Usage (Flex Template)::
     gcloud dataflow flex-template run "sales-monitor-$(date +%Y%m%d)" \\
         --template-file-gcs-location "gs://bucket/anomaly_monitor.json" \\
         --parameters table="project:dataset.table" \\
-        --parameters metric_spec='{"name":"revenue","aggregation":{"window":{"type":"fixed","size_sec":3600},"measures":[{"field":"transaction_amount","op":"SUM","alias":"revenue"}]}}' \\
+        --parameters metric_spec='{"name":"revenue","aggregation":{"window":{"type":"fixed","size_seconds":3600},"measures":[{"field":"transaction_amount","agg":"SUM","alias":"revenue"}]}}' \\
         --parameters detector_spec='{"type":"ZScore","config":{"features":["value"]}}' \\
         --region us-central1
 
@@ -35,7 +35,7 @@ Usage (PrismRunner)::
 
     python -m apache_beam.ml.anomaly.anomaly_monitor_pipeline \\
         --table=project:dataset.table \\
-        --metric_spec='{"name":"revenue","aggregation":{"window":{"type":"fixed","size_sec":3600},"measures":[{"field":"transaction_amount","op":"SUM","alias":"revenue"}]}}' \\
+        --metric_spec='{"name":"revenue","aggregation":{"window":{"type":"fixed","size_seconds":3600},"measures":[{"field":"transaction_amount","agg":"SUM","alias":"revenue"}]}}' \\
         --detector_spec='{"type":"ZScore","config":{"features":["value"]}}' \\
         --runner=PrismRunner
 
@@ -62,7 +62,7 @@ Top-level ``metric_spec`` object::
       "name": "<metric_name>",
       "aggregation": { ... },           # required
       "derived_fields": [ ... ],         # optional, pre-aggregation
-      "metric_expr": "<expression>",     # optional (required if >1 measure)
+      "measure_combiner": { ... },       # optional (required if >1 measure)
       "output_field": "value"            # optional, default "value"
     }
 
@@ -73,26 +73,26 @@ aggregation
     "aggregation": {
       "window": {
         "type": "fixed" | "sliding",
-        "size_sec": <int>,               # window size in seconds
-        "period_sec": <int>              # slide period (required for sliding)
+        "size_seconds": <int>,           # window size in seconds
+        "period_seconds": <int>          # slide period (required for sliding)
       },
       "group_by": ["field1", "field2"],  # optional, omit for global agg
       "measures": [
-        {"field": "<col>", "op": "<OP>", "alias": "<name>"},
+        {"field": "<col>", "agg": "<AGG>", "alias": "<name>"},
         ...
       ]
     }
 
-Aggregation operators (``op``): ``SUM``, ``COUNT``, ``MIN``, ``MAX``, ``MEAN``.
+Aggregation operators (``agg``): ``SUM``, ``COUNT``, ``MIN``, ``MAX``, ``MEAN``.
 
-For ``COUNT``, the ``field`` value is ignored (use ``"*"`` by convention)
-— it counts all rows in the group.
+For ``COUNT``, the ``field`` value is ignored — it counts all rows in the
+group.
 
 Expressions
 -----------
-Both ``metric_expr`` and ``derived_fields[].expression`` are Python
-expression strings. Bare names are field references, and all standard
-Python expression syntax is supported:
+Both ``measure_combiner.expression`` and ``derived_fields[].expression``
+are Python expression strings. Bare names are field references, and the
+following syntax is supported:
 
 - Arithmetic: ``+``, ``-``, ``*``, ``/``, ``//``, ``%``
 - Comparisons: ``==``, ``!=``, ``<``, ``<=``, ``>``, ``>=``
@@ -100,8 +100,8 @@ Python expression syntax is supported:
 - Conditional: ``true_val if condition else false_val``
 - Grouping: parentheses for precedence
 
-``metric_expr`` references measure aliases and is validated at pipeline
-construction time.
+``measure_combiner`` references measure aliases and is validated at
+pipeline construction time.
 
 derived_fields
 --------------
@@ -112,13 +112,13 @@ measures::
       {"name": "is_success", "expression": "1 if status == 'success' else 0"}
     ]
 
-metric_expr
------------
+measure_combiner
+----------------
 Post-aggregation expression that combines measure aliases into a single
 value. Required when there are multiple measures (e.g., ratio metrics)::
 
-    "metric_expr": "clicks / impressions"
-    "metric_expr": "(successes + partial) / total"
+    "measure_combiner": {"expression": "clicks / impressions"}
+    "measure_combiner": {"expression": "(successes + partial) / total"}
 
 
 detector_spec JSON Reference
@@ -182,17 +182,17 @@ Examples
 
 Simple SUM metric with ZScore::
 
-    --metric_spec='{"name":"revenue","aggregation":{"window":{"type":"fixed","size_sec":3600},"measures":[{"field":"transaction_amount","op":"SUM","alias":"revenue"}]}}'
+    --metric_spec='{"name":"revenue","aggregation":{"window":{"type":"fixed","size_seconds":3600},"measures":[{"field":"transaction_amount","agg":"SUM","alias":"revenue"}]}}'
     --detector_spec='{"type":"ZScore","config":{"features":["value"]}}'
 
 Grouped ratio metric (CTR) with ZScore::
 
-    --metric_spec='{"name":"ctr","aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["campaign_type","browser_version"],"measures":[{"field":"is_click","op":"SUM","alias":"clicks"},{"field":"*","op":"COUNT","alias":"impressions"}]},"metric_expr":"clicks / impressions"}'
+    --metric_spec='{"name":"ctr","aggregation":{"window":{"type":"fixed","size_seconds":10},"group_by":["campaign_type","browser_version"],"measures":[{"field":"is_click","agg":"SUM","alias":"clicks"},{"field":"is_click","agg":"COUNT","alias":"impressions"}]},"measure_combiner":{"expression":"clicks / impressions"}}'
     --detector_spec='{"type":"ZScore","config":{"features":["value"]}}'
 
 Derived field + ratio + custom threshold::
 
-    --metric_spec='{"name":"success_rate","derived_fields":[{"name":"is_success","expression":"1 if status == \'success\' else 0"}],"aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["brand_name","category"],"measures":[{"field":"is_success","op":"SUM","alias":"successes"},{"field":"*","op":"COUNT","alias":"total"}]},"metric_expr":"successes / total"}'
+    --metric_spec='{"name":"success_rate","derived_fields":[{"name":"is_success","expression":"1 if status == \'success\' else 0"}],"aggregation":{"window":{"type":"fixed","size_seconds":10},"group_by":["brand_name","category"],"measures":[{"field":"is_success","agg":"SUM","alias":"successes"},{"field":"is_success","agg":"COUNT","alias":"total"}]},"measure_combiner":{"expression":"successes / total"}}'
     --detector_spec='{"type":"ZScore","config":{"features":["value"],"threshold_criterion":{"type":"FixedThreshold","config":{"cutoff":10}}}}'
 """
 
@@ -396,7 +396,7 @@ def build_pipeline(pipeline, options):
       start_time=start_time,
       change_function=options.change_function,
       buffer_sec=options.buffer_sec,
-      trace=False)
+      trace=True)
   if stop_time is not None:
     cdc_kwargs['stop_time'] = stop_time
   if options.temp_dataset:
@@ -432,5 +432,5 @@ def run(argv=None):
 
 
 if __name__ == '__main__':
-  logging.getLogger().setLevel(logging.WARNING)
+  logging.getLogger().setLevel(logging.INFO)
   run()

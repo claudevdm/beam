@@ -385,11 +385,11 @@ def _max_default_zero(values):
 
 
 def _utc(ts):
-  """Format an epoch-seconds float or Timestamp as a compact UTC string."""
+  """Format an epoch-seconds float or Timestamp as a UTC string."""
   if isinstance(ts, Timestamp):
     ts = ts.seconds()
   return datetime.datetime.fromtimestamp(
-      ts, tz=datetime.timezone.utc).strftime('%H:%M:%S')
+      ts, tz=datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
 
 
 # =============================================================================

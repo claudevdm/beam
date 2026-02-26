@@ -48,7 +48,7 @@ Usage:
   python -m apache_beam.ml.anomaly.anomaly_monitor_pipeline \
       --project=dataflow-twest \
       --table='dataflow-twest:cdc.cuj1_revenue' \
-      --metric_spec='{"name":"revenue","aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["region"],"measures":[{"field":"transaction_amount","op":"MEAN","alias":"revenue"}]}}' \
+      --metric_spec='{"name":"revenue","aggregation":{"window":{"type":"fixed","size_seconds":10},"group_by":["region"],"measures":[{"field":"transaction_amount","agg":"MEAN","alias":"revenue"}]}}' \
       --detector_spec='{"type":"ZScore","config":{"features":["value"]}}' \
       --poll_interval_sec=30 --start_offset_sec=30 --duration_sec=980 \
       --runner=PrismRunner
@@ -64,7 +64,7 @@ Usage:
   python -m apache_beam.ml.anomaly.anomaly_monitor_pipeline \
       --project=dataflow-twest \
       --table='dataflow-twest:cdc.cuj2_ctr' \
-      --metric_spec='{"name":"ctr","aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["campaign_type","browser_version"],"measures":[{"field":"is_click","op":"SUM","alias":"clicks"},{"field":"*","op":"COUNT","alias":"impressions"}]},"metric_expr":"clicks / impressions"}' \
+      --metric_spec='{"name":"ctr","aggregation":{"window":{"type":"fixed","size_seconds":10},"group_by":["campaign_type","browser_version"],"measures":[{"field":"is_click","agg":"SUM","alias":"clicks"},{"field":"is_click","agg":"COUNT","alias":"impressions"}]},"measure_combiner":{"expression":"clicks / impressions"}}' \
       --detector_spec='{"type":"ZScore","config":{"features":["value"]}}' \
       --poll_interval_sec=30 --start_offset_sec=30 --duration_sec=980 \
       --runner=PrismRunner
@@ -80,7 +80,7 @@ Usage:
   python -m apache_beam.ml.anomaly.anomaly_monitor_pipeline \
       --project=dataflow-twest \
       --table='dataflow-twest:cdc.cuj3_success' \
-      --metric_spec='{"name":"success_rate","derived_fields":[{"name":"is_success","expression":"1 if status == '"'"'success'"'"' else 0"}],"aggregation":{"window":{"type":"fixed","size_sec":10},"group_by":["brand_name","category"],"measures":[{"field":"is_success","op":"SUM","alias":"successes"},{"field":"*","op":"COUNT","alias":"total"}]},"metric_expr":"successes / total"}' \
+      --metric_spec='{"name":"success_rate","derived_fields":[{"name":"is_success","expression":"1 if status == '"'"'success'"'"' else 0"}],"aggregation":{"window":{"type":"fixed","size_seconds":10},"group_by":["brand_name","category"],"measures":[{"field":"is_success","agg":"SUM","alias":"successes"},{"field":"is_success","agg":"COUNT","alias":"total"}]},"measure_combiner":{"expression":"successes / total"}}' \
       --detector_spec='{"type":"RobustZScore","config":{"features":["value"],"threshold_criterion":{"type":"FixedThreshold","config":{"cutoff":10}}}}' \
       --poll_interval_sec=30 --start_offset_sec=30 --duration_sec=980 \
       --runner=PrismRunner

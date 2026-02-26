@@ -35,9 +35,9 @@ Example usage::
   spec = MetricSpec(
       name='revenue',
       aggregation=AggregationSpec(
-          window=WindowSpec(type=WindowType.FIXED, size_sec=3600),
+          window=WindowSpec(type=WindowType.FIXED, size_seconds=3600),
           measures=[MeasureSpec(
-              field='transaction_amount', op=AggOp.SUM, alias='revenue')],
+              field='transaction_amount', agg=AggOp.SUM, alias='revenue')],
       ),
   )
   result = cdc_rows | ComputeMetric(spec) | AnomalyDetection(
@@ -47,14 +47,15 @@ Example usage::
   spec = MetricSpec(
       name='ctr',
       aggregation=AggregationSpec(
-          window=WindowSpec(type=WindowType.FIXED, size_sec=86400),
+          window=WindowSpec(type=WindowType.FIXED, size_seconds=86400),
           group_by=['campaign_type', 'user_segment'],
           measures=[
-              MeasureSpec(field='is_click', op=AggOp.SUM, alias='clicks'),
-              MeasureSpec(field='*', op=AggOp.COUNT, alias='impressions'),
+              MeasureSpec(field='is_click', agg=AggOp.SUM, alias='clicks'),
+              MeasureSpec(field='is_click', agg=AggOp.COUNT,
+                          alias='impressions'),
           ],
       ),
-      metric_expr=Expr.from_string("clicks / impressions"),
+      measure_combiner=Expr.from_string("clicks / impressions"),
   )
 
   # CUJ 3: Success rate with derived field
@@ -67,14 +68,15 @@ Example usage::
                   "1 if status == 'success' else 0")),
       ],
       aggregation=AggregationSpec(
-          window=WindowSpec(type=WindowType.FIXED, size_sec=86400),
+          window=WindowSpec(type=WindowType.FIXED, size_seconds=86400),
           group_by=['brand_name', 'category'],
           measures=[
-              MeasureSpec(field='is_success', op=AggOp.SUM, alias='successes'),
-              MeasureSpec(field='*', op=AggOp.COUNT, alias='total'),
+              MeasureSpec(field='is_success', agg=AggOp.SUM,
+                          alias='successes'),
+              MeasureSpec(field='is_success', agg=AggOp.COUNT, alias='total'),
           ],
       ),
-      metric_expr=Expr.from_string("successes / total"),
+      measure_combiner=Expr.from_string("successes / total"),
   )
 """
 
@@ -113,13 +115,13 @@ class WindowSpec:
 
   Args:
     type: FIXED or SLIDING window.
-    size_sec: Window size in seconds.
-    period_sec: Slide period in seconds (required for SLIDING, ignored for
+    size_seconds: Window size in seconds.
+    period_seconds: Slide period in seconds (required for SLIDING, ignored for
       FIXED).
   """
   type: WindowType = WindowType.FIXED
-  size_sec: int = 3600
-  period_sec: Optional[int] = None
+  size_seconds: int = 3600
+  period_seconds: Optional[int] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -140,12 +142,12 @@ class MeasureSpec:
   """A single aggregation measure.
 
   Args:
-    field: Input field name to aggregate, or ``'*'`` for COUNT.
-    op: The aggregation operator.
+    field: Input field name to aggregate.
+    agg: The aggregation operator.
     alias: Output name for this measure's result.
   """
   field: str
-  op: AggOp
+  agg: AggOp
   alias: str
 
 
@@ -174,7 +176,7 @@ class MetricSpec:
     name: Human-readable metric name.
     aggregation: Windowed grouped aggregation spec.
     derived_fields: Optional pre-aggregation derived fields.
-    metric_expr: Optional post-aggregation ``Expr`` operating on measure
+    measure_combiner: Optional post-aggregation ``Expr`` operating on measure
       aliases. Required when there are multiple measures.
     output_field: Name of the output field in the resulting beam.Row.
   """
@@ -183,13 +185,13 @@ class MetricSpec:
       name,
       aggregation,
       derived_fields=None,
-      metric_expr=None,
+      measure_combiner=None,
       output_field='value',
   ):
     self.name = name
     self.aggregation = aggregation
     self.derived_fields = derived_fields or []
-    self.metric_expr = metric_expr
+    self.measure_combiner = measure_combiner
     self.output_field = output_field
     self._validate()
 
@@ -197,30 +199,31 @@ class MetricSpec:
     agg = self.aggregation
     if not agg.measures:
       raise ValueError("MetricSpec requires at least one measure")
-    if self.metric_expr is None and len(agg.measures) > 1:
+    if self.measure_combiner is None and len(agg.measures) > 1:
       raise ValueError(
-          "metric_expr is required when there are multiple measures. "
+          "measure_combiner is required when there are multiple measures. "
           f"Got {len(agg.measures)} measures: "
           f"{[m.alias for m in agg.measures]}")
     if (agg.window.type == WindowType.SLIDING and
-        agg.window.period_sec is None):
-      raise ValueError("period_sec is required for SLIDING windows")
+        agg.window.period_seconds is None):
+      raise ValueError("period_seconds is required for SLIDING windows")
     for df in self.derived_fields:
       if not isinstance(df.expression, Expr):
         raise TypeError(
             f"DerivedField.expression must be an Expr, "
             f"got {type(df.expression).__name__}")
-    if self.metric_expr is not None and not isinstance(self.metric_expr, Expr):
+    if (self.measure_combiner is not None and
+        not isinstance(self.measure_combiner, Expr)):
       raise TypeError(
-          f"metric_expr must be an Expr, "
-          f"got {type(self.metric_expr).__name__}")
-    # Validate that metric_expr only references known measure aliases.
-    if self.metric_expr is not None:
+          f"measure_combiner must be an Expr, "
+          f"got {type(self.measure_combiner).__name__}")
+    # Validate that measure_combiner only references known measure aliases.
+    if self.measure_combiner is not None:
       aliases = {m.alias for m in agg.measures}
-      unknown = self.metric_expr.field_refs() - aliases
+      unknown = self.measure_combiner.field_refs() - aliases
       if unknown:
         raise ValueError(
-            f"metric_expr references unknown fields: {unknown}. "
+            f"measure_combiner references unknown fields: {unknown}. "
             f"Available measure aliases: {aliases}")
 
   def to_dict(self):
@@ -230,12 +233,12 @@ class MetricSpec:
         'aggregation': {
             'window': {
                 'type': self.aggregation.window.type.value,
-                'size_sec': self.aggregation.window.size_sec,
-                'period_sec': self.aggregation.window.period_sec,
+                'size_seconds': self.aggregation.window.size_seconds,
+                'period_seconds': self.aggregation.window.period_seconds,
             },
             'group_by': list(self.aggregation.group_by),
             'measures': [{
-                'field': m.field, 'op': m.op.value, 'alias': m.alias
+                'field': m.field, 'agg': m.agg.value, 'alias': m.alias
             } for m in self.aggregation.measures],
         },
         'output_field': self.output_field,
@@ -244,18 +247,18 @@ class MetricSpec:
       result['derived_fields'] = [{
           'name': df.name, 'expression': str(df.expression)
       } for df in self.derived_fields]
-    if self.metric_expr is not None:
-      result['metric_expr'] = str(self.metric_expr)
+    if self.measure_combiner is not None:
+      result['measure_combiner'] = {'expression': str(self.measure_combiner)}
     return result
 
   @classmethod
   def from_dict(cls, d):
     """Construct a MetricSpec from a plain dict (e.g., loaded from JSON).
 
-    Expressions (``metric_expr`` and ``derived_fields[].expression``) are
-    Python expression strings, e.g.::
+    Expressions (``measure_combiner`` and ``derived_fields[].expression``)
+    are Python expression strings, e.g.::
 
-      "metric_expr": "clicks / impressions"
+      "measure_combiner": {"expression": "clicks / impressions"}
       "expression": "1 if status == 'success' else 0"
 
     Args:
@@ -268,17 +271,17 @@ class MetricSpec:
       TypeError: If an expression is not a string.
       SyntaxError: If an expression string is not valid Python syntax.
       ValueError: If an expression uses unsupported constructs, or if
-        metric_expr references fields not in the measure aliases.
+        measure_combiner references fields not in the measure aliases.
     """
     agg_dict = d['aggregation']
     window_dict = agg_dict.get('window', {})
     window = WindowSpec(
         type=WindowType(window_dict.get('type', 'fixed')),
-        size_sec=window_dict.get('size_sec', 3600),
-        period_sec=window_dict.get('period_sec'),
+        size_seconds=window_dict.get('size_seconds', 3600),
+        period_seconds=window_dict.get('period_seconds'),
     )
     measures = [
-        MeasureSpec(field=m['field'], op=AggOp(m['op']), alias=m['alias'])
+        MeasureSpec(field=m['field'], agg=AggOp(m['agg']), alias=m['alias'])
         for m in agg_dict.get('measures', [])
     ]
     derived_fields = None
@@ -294,15 +297,16 @@ class MetricSpec:
         derived_fields.append(
             DerivedField(
                 name=df['name'], expression=Expr.from_string(expr_val)))
-    metric_expr = None
-    if 'metric_expr' in d and d['metric_expr'] is not None:
-      expr_val = d['metric_expr']
+    measure_combiner = None
+    if 'measure_combiner' in d and d['measure_combiner'] is not None:
+      mc = d['measure_combiner']
+      expr_val = mc['expression'] if isinstance(mc, dict) else mc
       if not isinstance(expr_val, str):
         raise TypeError(
-            f"metric_expr must be a string, "
+            f"measure_combiner.expression must be a string, "
             f"got {type(expr_val).__name__}. "
             f"Example: \"clicks / impressions\"")
-      metric_expr = Expr.from_string(expr_val)
+      measure_combiner = Expr.from_string(expr_val)
     return cls(
         name=d['name'],
         aggregation=AggregationSpec(
@@ -311,7 +315,7 @@ class MetricSpec:
             measures=measures,
         ),
         derived_fields=derived_fields,
-        metric_expr=metric_expr,
+        measure_combiner=measure_combiner,
         output_field=d.get('output_field', 'value'),
         _run_init=True,
     )
@@ -322,113 +326,20 @@ class MetricSpec:
 # ---------------------------------------------------------------------------
 
 
-class _SumCombineFn(beam.CombineFn):
-  """Simple sum combiner."""
-  def create_accumulator(self):
-    return 0
-
-  def add_input(self, accumulator, element):
-    return accumulator + element
-
-  def merge_accumulators(self, accumulators):
-    return sum(accumulators)
-
-  def extract_output(self, accumulator):
-    return accumulator
-
-
-class _MinCombineFn(beam.CombineFn):
-  """Min combiner."""
-  def create_accumulator(self):
-    return float('inf')
-
-  def add_input(self, accumulator, element):
-    return min(accumulator, element)
-
-  def merge_accumulators(self, accumulators):
-    return min(accumulators)
-
-  def extract_output(self, accumulator):
-    return accumulator
-
-
-class _MaxCombineFn(beam.CombineFn):
-  """Max combiner."""
-  def create_accumulator(self):
-    return float('-inf')
-
-  def add_input(self, accumulator, element):
-    return max(accumulator, element)
-
-  def merge_accumulators(self, accumulators):
-    return max(accumulators)
-
-  def extract_output(self, accumulator):
-    return accumulator
-
-
-def _get_combiner_for_op(op):
+def _get_combiner_for_agg(agg_op):
   """Map AggOp enum to a Beam CombineFn instance."""
-  if op == AggOp.SUM:
-    return _SumCombineFn()
-  elif op == AggOp.COUNT:
+  if agg_op == AggOp.SUM:
+    return beam.CombineFn.from_callable(sum)
+  elif agg_op == AggOp.COUNT:
     return combiners.CountCombineFn()
-  elif op == AggOp.MIN:
-    return _MinCombineFn()
-  elif op == AggOp.MAX:
-    return _MaxCombineFn()
-  elif op == AggOp.MEAN:
+  elif agg_op == AggOp.MIN:
+    return beam.CombineFn.from_callable(min)
+  elif agg_op == AggOp.MAX:
+    return beam.CombineFn.from_callable(max)
+  elif agg_op == AggOp.MEAN:
     return combiners.MeanCombineFn()
   else:
-    raise ValueError(f"Unknown aggregation operator: {op}")
-
-
-class _MetricCombineFn(beam.CombineFn):
-  """CombineFn that applies multiple aggregations to different fields of input
-  dicts in a single pass.
-
-  Each measure extracts a specific field from the input dict and feeds it
-  to its own sub-combiner. The output is a dict mapping measure aliases to
-  aggregated values.
-  """
-  def __init__(self, measures):
-    self._measures = measures
-    self._combiners = [_get_combiner_for_op(m.op) for m in measures]
-
-  def create_accumulator(self):
-    return [c.create_accumulator() for c in self._combiners]
-
-  def add_input(self, accumulator, element):
-    result = []
-    for i, (measure, comb) in enumerate(zip(self._measures, self._combiners)):
-      if measure.op == AggOp.COUNT:
-        result.append(comb.add_input(accumulator[i], element))
-      else:
-        field_val = element.get(measure.field)
-        if field_val is not None:
-          result.append(comb.add_input(accumulator[i], field_val))
-        else:
-          result.append(accumulator[i])
-    return result
-
-  def merge_accumulators(self, accumulators):
-    accumulators = list(accumulators)
-    if not accumulators:
-      return self.create_accumulator()
-    if len(accumulators) == 1:
-      return accumulators[0]
-    merged = []
-    for i, comb in enumerate(self._combiners):
-      per_combiner_accs = [acc[i] for acc in accumulators]
-      merged.append(comb.merge_accumulators(per_combiner_accs))
-    return merged
-
-  def extract_output(self, accumulator):
-    return {
-        measure.alias: comb.extract_output(acc)
-        for measure, comb, acc in zip(
-            self._measures, self._combiners, accumulator)
-    }
+    raise ValueError(f"Unknown aggregation operator: {agg_op}")
 
 
 class _DerivedFieldsFn:
@@ -450,8 +361,8 @@ class _DerivedFieldsFn:
 
 class _ApplyMetricExpr(beam.DoFn):
   """DoFn that evaluates a post-aggregation expression on combined results."""
-  def __init__(self, metric_expr, output_field, is_keyed):
-    self._metric_expr = metric_expr
+  def __init__(self, measure_combiner, output_field, is_keyed):
+    self._measure_combiner = measure_combiner
     self._output_field = output_field
     self._is_keyed = is_keyed
 
@@ -461,8 +372,8 @@ class _ApplyMetricExpr(beam.DoFn):
     else:
       agg_dict = element
 
-    if self._metric_expr is not None:
-      value = float(self._metric_expr(agg_dict))
+    if self._measure_combiner is not None:
+      value = float(self._measure_combiner(agg_dict))
     else:
       value = float(next(iter(agg_dict.values())))
 
@@ -504,35 +415,53 @@ class ComputeMetric(beam.PTransform):
 
     # Step 2: Apply windowing
     if agg.window.type == WindowType.FIXED:
-      window_fn = beam_window.FixedWindows(agg.window.size_sec)
+      window_fn = beam_window.FixedWindows(agg.window.size_seconds)
     elif agg.window.type == WindowType.SLIDING:
       window_fn = beam_window.SlidingWindows(
-          agg.window.size_sec, agg.window.period_sec)
+          agg.window.size_seconds, agg.window.period_seconds)
     else:
       raise ValueError(f"Unknown window type: {agg.window.type}")
 
     windowed = pcoll | 'Window' >> beam.WindowInto(window_fn)
 
     # Step 3: Aggregate
-    combine_fn = _MetricCombineFn(agg.measures)
+    measures = agg.measures
+    combine_fn = combiners.TupleCombineFn(
+        *[_get_combiner_for_agg(m.agg) for m in measures])
+    aliases = [m.alias for m in measures]
+
+    def extract_fields(row_dict):
+      return tuple(
+          row_dict.get(m.field) if m.agg != AggOp.COUNT else 1
+          for m in measures)
+
+    def to_alias_dict(values):
+      return dict(zip(aliases, values))
+
     is_keyed = bool(agg.group_by)
 
     if is_keyed:
       group_by_fields = agg.group_by
 
-      def extract_key(row_dict):
-        return tuple(row_dict.get(f) for f in group_by_fields)
+      def extract_key_and_fields(row_dict):
+        key = tuple(row_dict.get(f) for f in group_by_fields)
+        return (key, extract_fields(row_dict))
 
-      keyed = windowed | 'ExtractKey' >> beam.WithKeys(extract_key)
-      aggregated = keyed | 'Combine' >> beam.CombinePerKey(combine_fn)
+      keyed = windowed | 'ExtractKey' >> beam.Map(extract_key_and_fields)
+      aggregated = (
+          keyed
+          | 'Combine' >> beam.CombinePerKey(combine_fn)
+          | 'ToDict' >> beam.MapTuple(lambda k, v: (k, to_alias_dict(v))))
     else:
       aggregated = (
           windowed
-          | 'Combine' >> beam.CombineGlobally(combine_fn).without_defaults())
+          | 'ExtractFields' >> beam.Map(extract_fields)
+          | 'Combine' >> beam.CombineGlobally(combine_fn).without_defaults()
+          | 'ToDict' >> beam.Map(to_alias_dict))
 
     # Step 4: Apply metric expression and set output type hints
     metric_dofn = _ApplyMetricExpr(
-        spec.metric_expr, spec.output_field, is_keyed)
+        spec.measure_combiner, spec.output_field, is_keyed)
 
     if is_keyed:
       # AnomalyDetection checks isinstance(element_type, TupleConstraint)

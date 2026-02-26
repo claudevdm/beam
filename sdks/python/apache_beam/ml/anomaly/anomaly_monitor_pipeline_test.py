@@ -47,37 +47,39 @@ class ParseMetricSpecTest(unittest.TestCase):
         'name': 'revenue',
         'aggregation': {
             'window': {
-                'type': 'fixed', 'size_sec': 3600
+                'type': 'fixed', 'size_seconds': 3600
             },
             'measures': [{
-                'field': 'transaction_amount', 'op': 'SUM', 'alias': 'revenue'
+                'field': 'transaction_amount', 'agg': 'SUM', 'alias': 'revenue'
             }],
         },
     })
     spec = _parse_metric_spec(spec_json)
     self.assertEqual(spec.name, 'revenue')
-    self.assertEqual(spec.aggregation.window.size_sec, 3600)
+    self.assertEqual(spec.aggregation.window.size_seconds, 3600)
     self.assertEqual(len(spec.aggregation.measures), 1)
-    self.assertEqual(spec.aggregation.measures[0].op, AggOp.SUM)
+    self.assertEqual(spec.aggregation.measures[0].agg, AggOp.SUM)
 
   def test_cuj2_ctr(self):
     spec_json = json.dumps({
         'name': 'ctr',
         'aggregation': {
             'window': {
-                'type': 'fixed', 'size_sec': 86400
+                'type': 'fixed', 'size_seconds': 86400
             },
             'group_by': ['campaign_type', 'user_segment'],
             'measures': [
                 {
-                    'field': 'is_click', 'op': 'SUM', 'alias': 'clicks'
+                    'field': 'is_click', 'agg': 'SUM', 'alias': 'clicks'
                 },
                 {
-                    'field': '*', 'op': 'COUNT', 'alias': 'impressions'
+                    'field': '*', 'agg': 'COUNT', 'alias': 'impressions'
                 },
             ],
         },
-        'metric_expr': 'clicks / impressions',
+        'measure_combiner': {
+            'expression': 'clicks / impressions'
+        },
     })
     spec = _parse_metric_spec(spec_json)
     self.assertEqual(spec.name, 'ctr')
@@ -85,7 +87,7 @@ class ParseMetricSpecTest(unittest.TestCase):
         spec.aggregation.group_by, ['campaign_type', 'user_segment'])
     self.assertEqual(len(spec.aggregation.measures), 2)
     self.assertAlmostEqual(
-        spec.metric_expr({
+        spec.measure_combiner({
             'clicks': 50, 'impressions': 1000
         }), 0.05)
 
@@ -98,19 +100,21 @@ class ParseMetricSpecTest(unittest.TestCase):
         }],
         'aggregation': {
             'window': {
-                'type': 'fixed', 'size_sec': 86400
+                'type': 'fixed', 'size_seconds': 86400
             },
             'group_by': ['brand_name', 'category'],
             'measures': [
                 {
-                    'field': 'is_success', 'op': 'SUM', 'alias': 'successes'
+                    'field': 'is_success', 'agg': 'SUM', 'alias': 'successes'
                 },
                 {
-                    'field': '*', 'op': 'COUNT', 'alias': 'total'
+                    'field': '*', 'agg': 'COUNT', 'alias': 'total'
                 },
             ],
         },
-        'metric_expr': 'successes / total',
+        'measure_combiner': {
+            'expression': 'successes / total'
+        },
     })
     spec = _parse_metric_spec(spec_json)
     self.assertEqual(spec.name, 'success_rate')
@@ -180,7 +184,7 @@ class AnomalyMonitorOptionsTest(unittest.TestCase):
   def test_required_options(self):
     options = PipelineOptions([
         '--table=project:dataset.table',
-        '--metric_spec={"name":"test","aggregation":{"measures":[{"field":"x","op":"SUM","alias":"y"}]}}',
+        '--metric_spec={"name":"test","aggregation":{"measures":[{"field":"x","agg":"SUM","alias":"y"}]}}',
         '--detector_spec={"type":"ZScore","config":{"features":["value"]}}',
     ])
     monitor = options.view_as(AnomalyMonitorOptions)
@@ -245,11 +249,11 @@ class EndToEndPipelineTest(unittest.TestCase):
         'name': 'revenue',
         'aggregation': {
             'window': {
-                'type': 'fixed', 'size_sec': 10
+                'type': 'fixed', 'size_seconds': 10
             },
             'measures': [
                 {
-                    'field': 'amount', 'op': 'SUM', 'alias': 'total'
+                    'field': 'amount', 'agg': 'SUM', 'alias': 'total'
                 },
             ],
         },
@@ -286,19 +290,21 @@ class EndToEndPipelineTest(unittest.TestCase):
         'name': 'ctr',
         'aggregation': {
             'window': {
-                'type': 'fixed', 'size_sec': 10
+                'type': 'fixed', 'size_seconds': 10
             },
             'group_by': ['campaign_type'],
             'measures': [
                 {
-                    'field': 'is_click', 'op': 'SUM', 'alias': 'clicks'
+                    'field': 'is_click', 'agg': 'SUM', 'alias': 'clicks'
                 },
                 {
-                    'field': '*', 'op': 'COUNT', 'alias': 'impressions'
+                    'field': '*', 'agg': 'COUNT', 'alias': 'impressions'
                 },
             ],
         },
-        'metric_expr': 'clicks / impressions',
+        'measure_combiner': {
+            'expression': 'clicks / impressions'
+        },
     })
     detector_json = json.dumps({
         'type': 'ZScore',
@@ -353,19 +359,21 @@ class EndToEndPipelineTest(unittest.TestCase):
         }],
         'aggregation': {
             'window': {
-                'type': 'fixed', 'size_sec': 10
+                'type': 'fixed', 'size_seconds': 10
             },
             'group_by': ['region'],
             'measures': [
                 {
-                    'field': 'is_success', 'op': 'SUM', 'alias': 'successes'
+                    'field': 'is_success', 'agg': 'SUM', 'alias': 'successes'
                 },
                 {
-                    'field': '*', 'op': 'COUNT', 'alias': 'total'
+                    'field': '*', 'agg': 'COUNT', 'alias': 'total'
                 },
             ],
         },
-        'metric_expr': 'successes / total',
+        'measure_combiner': {
+            'expression': 'successes / total'
+        },
     })
     detector_json = json.dumps({
         'type': 'ZScore',
@@ -410,10 +418,10 @@ class SpecRoundTripFromGcloudTest(unittest.TestCase):
     original_spec = MetricSpec(
         name='revenue',
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=3600),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=3600),
             measures=[
                 MeasureSpec(
-                    field='transaction_amount', op=AggOp.SUM, alias='revenue')
+                    field='transaction_amount', agg=AggOp.SUM, alias='revenue')
             ]),
         _run_init=True)
     # Serialize to JSON (what the user types on the command line)
@@ -422,8 +430,8 @@ class SpecRoundTripFromGcloudTest(unittest.TestCase):
     restored = _parse_metric_spec(json_str)
     self.assertEqual(restored.name, original_spec.name)
     self.assertEqual(
-        restored.aggregation.window.size_sec,
-        original_spec.aggregation.window.size_sec)
+        restored.aggregation.window.size_seconds,
+        original_spec.aggregation.window.size_seconds)
     self.assertEqual(
         restored.aggregation.measures[0].field,
         original_spec.aggregation.measures[0].field)

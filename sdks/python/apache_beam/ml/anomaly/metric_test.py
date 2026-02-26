@@ -42,8 +42,9 @@ class MetricSpecValidationTest(unittest.TestCase):
     spec = MetricSpec(
         name='revenue',
         aggregation=AggregationSpec(
-            measures=[MeasureSpec(field='amount', op=AggOp.SUM, alias='total')
-                      ]),
+            measures=[
+                MeasureSpec(field='amount', agg=AggOp.SUM, alias='total')
+            ]),
         _run_init=True)
     self.assertEqual(spec.name, 'revenue')
 
@@ -53,8 +54,8 @@ class MetricSpecValidationTest(unittest.TestCase):
           name='test',
           aggregation=AggregationSpec(
               measures=[
-                  MeasureSpec(field='a', op=AggOp.SUM, alias='sum_a'),
-                  MeasureSpec(field='*', op=AggOp.COUNT, alias='count'),
+                  MeasureSpec(field='a', agg=AggOp.SUM, alias='sum_a'),
+                  MeasureSpec(field='*', agg=AggOp.COUNT, alias='count'),
               ]),
           _run_init=True)
 
@@ -68,8 +69,8 @@ class MetricSpecValidationTest(unittest.TestCase):
       MetricSpec(
           name='test',
           aggregation=AggregationSpec(
-              window=WindowSpec(type=WindowType.SLIDING, size_sec=3600),
-              measures=[MeasureSpec(field='a', op=AggOp.SUM, alias='total')]),
+              window=WindowSpec(type=WindowType.SLIDING, size_seconds=3600),
+              measures=[MeasureSpec(field='a', agg=AggOp.SUM, alias='total')]),
           _run_init=True)
 
   def test_sliding_with_period_ok(self):
@@ -77,21 +78,21 @@ class MetricSpecValidationTest(unittest.TestCase):
         name='test',
         aggregation=AggregationSpec(
             window=WindowSpec(
-                type=WindowType.SLIDING, size_sec=3600, period_sec=60),
-            measures=[MeasureSpec(field='a', op=AggOp.SUM, alias='total')]),
+                type=WindowType.SLIDING, size_seconds=3600, period_seconds=60),
+            measures=[MeasureSpec(field='a', agg=AggOp.SUM, alias='total')]),
         _run_init=True)
-    self.assertEqual(spec.aggregation.window.period_sec, 60)
+    self.assertEqual(spec.aggregation.window.period_seconds, 60)
 
-  def test_metric_expr_must_be_expr(self):
+  def test_measure_combiner_must_be_expr(self):
     with self.assertRaises(TypeError):
       MetricSpec(
           name='test',
           aggregation=AggregationSpec(
               measures=[
-                  MeasureSpec(field='a', op=AggOp.SUM, alias='x'),
-                  MeasureSpec(field='*', op=AggOp.COUNT, alias='y'),
+                  MeasureSpec(field='a', agg=AggOp.SUM, alias='x'),
+                  MeasureSpec(field='*', agg=AggOp.COUNT, alias='y'),
               ]),
-          metric_expr="x / y",  # string, not Expr
+          measure_combiner="x / y",  # string, not Expr
           _run_init=True)
 
 
@@ -110,29 +111,29 @@ class MetricSpecSerializationTest(unittest.TestCase):
     spec = MetricSpec(
         name='revenue',
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=3600),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=3600),
             measures=[
                 MeasureSpec(
-                    field='transaction_amount', op=AggOp.SUM, alias='revenue')
+                    field='transaction_amount', agg=AggOp.SUM, alias='revenue')
             ]),
         _run_init=True)
     spec2 = self._round_trip(spec)
     self.assertEqual(spec2.name, 'revenue')
-    self.assertEqual(spec2.aggregation.window.size_sec, 3600)
+    self.assertEqual(spec2.aggregation.window.size_seconds, 3600)
     self.assertEqual(len(spec2.aggregation.measures), 1)
-    self.assertEqual(spec2.aggregation.measures[0].op, AggOp.SUM)
+    self.assertEqual(spec2.aggregation.measures[0].agg, AggOp.SUM)
 
   def test_cuj2_round_trip(self):
     spec = MetricSpec(
         name='ctr',
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=86400),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=86400),
             group_by=['campaign_type', 'user_segment', 'browser_version'],
             measures=[
-                MeasureSpec(field='is_click', op=AggOp.SUM, alias='clicks'),
-                MeasureSpec(field='*', op=AggOp.COUNT, alias='impressions'),
+                MeasureSpec(field='is_click', agg=AggOp.SUM, alias='clicks'),
+                MeasureSpec(field='*', agg=AggOp.COUNT, alias='impressions'),
             ]),
-        metric_expr=Expr.from_string('clicks / impressions'),
+        measure_combiner=Expr.from_string('clicks / impressions'),
         _run_init=True)
     spec2 = self._round_trip(spec)
     self.assertEqual(spec2.name, 'ctr')
@@ -142,7 +143,7 @@ class MetricSpecSerializationTest(unittest.TestCase):
     self.assertEqual(len(spec2.aggregation.measures), 2)
     # Verify expression round-tripped
     self.assertAlmostEqual(
-        spec2.metric_expr({
+        spec2.measure_combiner({
             'clicks': 50, 'impressions': 1000
         }), 0.05)
 
@@ -155,14 +156,14 @@ class MetricSpecSerializationTest(unittest.TestCase):
                 expression=Expr.from_string("1 if status == 'success' else 0"))
         ],
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=86400),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=86400),
             group_by=['brand_name', 'category'],
             measures=[
                 MeasureSpec(
-                    field='is_success', op=AggOp.SUM, alias='successes'),
-                MeasureSpec(field='*', op=AggOp.COUNT, alias='total'),
+                    field='is_success', agg=AggOp.SUM, alias='successes'),
+                MeasureSpec(field='*', agg=AggOp.COUNT, alias='total'),
             ]),
-        metric_expr=Expr.from_string('successes / total'),
+        measure_combiner=Expr.from_string('successes / total'),
         _run_init=True)
     spec2 = self._round_trip(spec)
     self.assertEqual(spec2.name, 'success_rate')
@@ -190,10 +191,10 @@ class ComputeMetricCUJ1Test(unittest.TestCase):
     spec = MetricSpec(
         name='revenue',
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=3600),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=3600),
             measures=[
                 MeasureSpec(
-                    field='transaction_amount', op=AggOp.SUM, alias='revenue')
+                    field='transaction_amount', agg=AggOp.SUM, alias='revenue')
             ]),
         _run_init=True)
 
@@ -229,13 +230,13 @@ class ComputeMetricCUJ2Test(unittest.TestCase):
     spec = MetricSpec(
         name='ctr',
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=3600),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=3600),
             group_by=['campaign_type'],
             measures=[
-                MeasureSpec(field='is_click', op=AggOp.SUM, alias='clicks'),
-                MeasureSpec(field='*', op=AggOp.COUNT, alias='impressions'),
+                MeasureSpec(field='is_click', agg=AggOp.SUM, alias='clicks'),
+                MeasureSpec(field='*', agg=AggOp.COUNT, alias='impressions'),
             ]),
-        metric_expr=Expr.from_string('clicks / impressions'),
+        measure_combiner=Expr.from_string('clicks / impressions'),
         _run_init=True)
 
     with TestPipeline() as p:
@@ -287,14 +288,14 @@ class ComputeMetricCUJ3Test(unittest.TestCase):
                 expression=Expr.from_string("1 if status == 'success' else 0"))
         ],
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=3600),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=3600),
             group_by=['brand_name', 'category'],
             measures=[
                 MeasureSpec(
-                    field='is_success', op=AggOp.SUM, alias='successes'),
-                MeasureSpec(field='*', op=AggOp.COUNT, alias='total'),
+                    field='is_success', agg=AggOp.SUM, alias='successes'),
+                MeasureSpec(field='*', agg=AggOp.COUNT, alias='total'),
             ]),
-        metric_expr=Expr.from_string('successes / total'),
+        measure_combiner=Expr.from_string('successes / total'),
         _run_init=True)
 
     with TestPipeline() as p:
@@ -323,8 +324,8 @@ class ComputeMetricMiscTest(unittest.TestCase):
     spec = MetricSpec(
         name='count',
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=3600),
-            measures=[MeasureSpec(field='*', op=AggOp.COUNT, alias='total')]),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=3600),
+            measures=[MeasureSpec(field='*', agg=AggOp.COUNT, alias='total')]),
         _run_init=True)
 
     with TestPipeline() as p:
@@ -344,8 +345,8 @@ class ComputeMetricMiscTest(unittest.TestCase):
     spec = MetricSpec(
         name='avg_score',
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=3600),
-            measures=[MeasureSpec(field='score', op=AggOp.MEAN, alias='avg')]),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=3600),
+            measures=[MeasureSpec(field='score', agg=AggOp.MEAN, alias='avg')]),
         _run_init=True)
 
     with TestPipeline() as p:
@@ -365,12 +366,12 @@ class ComputeMetricMiscTest(unittest.TestCase):
     spec = MetricSpec(
         name='latency_range',
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=3600),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=3600),
             measures=[
-                MeasureSpec(field='latency', op=AggOp.MIN, alias='min_l'),
-                MeasureSpec(field='latency', op=AggOp.MAX, alias='max_l'),
+                MeasureSpec(field='latency', agg=AggOp.MIN, alias='min_l'),
+                MeasureSpec(field='latency', agg=AggOp.MAX, alias='max_l'),
             ]),
-        metric_expr=Expr.from_string('max_l / min_l'),
+        measure_combiner=Expr.from_string('max_l / min_l'),
         _run_init=True)
 
     with TestPipeline() as p:
@@ -392,9 +393,10 @@ class ComputeMetricWindowMetadataTest(unittest.TestCase):
     spec = MetricSpec(
         name='revenue',
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=3600),
-            measures=[MeasureSpec(field='amount', op=AggOp.SUM,
-                                  alias='total')]),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=3600),
+            measures=[
+                MeasureSpec(field='amount', agg=AggOp.SUM, alias='total')
+            ]),
         _run_init=True)
 
     with TestPipeline() as p:
@@ -418,9 +420,9 @@ class ComputeMetricWindowMetadataTest(unittest.TestCase):
     spec = MetricSpec(
         name='grouped',
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=3600),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=3600),
             group_by=['group'],
-            measures=[MeasureSpec(field='val', op=AggOp.SUM, alias='total')]),
+            measures=[MeasureSpec(field='val', agg=AggOp.SUM, alias='total')]),
         _run_init=True)
 
     with TestPipeline() as p:
@@ -458,9 +460,10 @@ class ComputeMetricEndToEndTest(unittest.TestCase):
     spec = MetricSpec(
         name='revenue',
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=10),
-            measures=[MeasureSpec(field='amount', op=AggOp.SUM,
-                                  alias='total')]),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=10),
+            measures=[
+                MeasureSpec(field='amount', agg=AggOp.SUM, alias='total')
+            ]),
         _run_init=True)
 
     detector = ZScore(features=['value'], _run_init=True)
@@ -490,9 +493,9 @@ class ComputeMetricEndToEndTest(unittest.TestCase):
     spec = MetricSpec(
         name='grouped_sum',
         aggregation=AggregationSpec(
-            window=WindowSpec(type=WindowType.FIXED, size_sec=1),
+            window=WindowSpec(type=WindowType.FIXED, size_seconds=1),
             group_by=['group'],
-            measures=[MeasureSpec(field='val', op=AggOp.SUM, alias='total')]),
+            measures=[MeasureSpec(field='val', agg=AggOp.SUM, alias='total')]),
         _run_init=True)
 
     detector = ZScore(features=['value'], _run_init=True)
