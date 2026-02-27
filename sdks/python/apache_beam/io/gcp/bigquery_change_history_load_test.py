@@ -87,8 +87,9 @@ PROFILES = {
 }
 
 SOURCE_SCHEMA = 'id:INTEGER,name:STRING,value:FLOAT,payload:STRING'
-SINK_SCHEMA = ('id:INTEGER,name:STRING,value:FLOAT,payload:STRING,'
-               'change_type:STRING,change_timestamp:TIMESTAMP')
+SINK_SCHEMA = (
+    'id:INTEGER,name:STRING,value:FLOAT,payload:STRING,'
+    'change_type:STRING,change_timestamp:TIMESTAMP')
 
 
 def _coerce_datetimes(row):
@@ -103,8 +104,8 @@ def _coerce_datetimes(row):
   out = {}
   for k, v in row.items():
     if isinstance(v, datetime.datetime):
-      out[k] = Timestamp.from_utc_datetime(v.replace(tzinfo=datetime.timezone.utc)
-                                           if v.tzinfo is None else v)
+      out[k] = Timestamp.from_utc_datetime(
+          v.replace(tzinfo=datetime.timezone.utc) if v.tzinfo is None else v)
     else:
       out[k] = v
   return out
@@ -113,6 +114,7 @@ def _coerce_datetimes(row):
 # =============================================================================
 # Table setup
 # =============================================================================
+
 
 def create_source_table(bq_wrapper, project, dataset, table):
   """Create a change-history-enabled source table via DDL."""
@@ -135,12 +137,15 @@ def create_source_table(bq_wrapper, project, dataset, table):
   bq_wrapper.wait_for_bq_job(response.jobReference, sleep_duration_sec=2)
   _LOGGER.info(
       'Source table %s.%s.%s created (with change history enabled)',
-      project, dataset, table)
+      project,
+      dataset,
+      table)
 
 
 # =============================================================================
 # Row generation (stateless — IDs derived from impulse timestamp)
 # =============================================================================
+
 
 def generate_rows(
     impulse_ts, start_time, interval, rows_per_impulse, payload_bytes):
@@ -161,8 +166,8 @@ def generate_rows(
         'id': row_id,
         'name': f'row_{row_id}_{uuid.uuid4().hex[:4]}',
         'value': round(random.uniform(0, 100), 2),
-        'payload': uuid.uuid4().hex * (payload_bytes // 32 + 1)
-                   if payload_bytes > 0 else '',
+        'payload': uuid.uuid4().hex *
+        (payload_bytes // 32 + 1) if payload_bytes > 0 else '',
     }
     yield row
 
@@ -170,6 +175,7 @@ def generate_rows(
 # =============================================================================
 # Validation queries
 # =============================================================================
+
 
 def run_validation_query(bq_wrapper, project, sql):
   """Execute a validation SQL query and return result rows."""
@@ -199,8 +205,12 @@ def _cell_val(cell):
 
 
 def validate_results(
-    bq_wrapper, project, source_table, sink_table,
-    start_time=None, reader_stop_time=None):
+    bq_wrapper,
+    project,
+    source_table,
+    sink_table,
+    start_time=None,
+    reader_stop_time=None):
   """Run all validation queries and return a results dict.
 
   Args:
@@ -243,8 +253,7 @@ def validate_results(
   missing_count_rows = run_validation_query(
       bq_wrapper, project, missing_count_sql)
   results['missing_count'] = (
-      int(_cell_val(missing_count_rows[0].f[0]))
-      if missing_count_rows else 0)
+      int(_cell_val(missing_count_rows[0].f[0])) if missing_count_rows else 0)
   # Get a small sample for debugging
   missing_sample_sql = (
       f'SELECT id FROM ('
@@ -254,8 +263,8 @@ def validate_results(
   missing_sample_rows = run_validation_query(
       bq_wrapper, project, missing_sample_sql)
   results['missing_sample'] = [
-      int(_cell_val(r.f[0]))
-      for r in missing_sample_rows] if missing_sample_rows else []
+      int(_cell_val(r.f[0])) for r in missing_sample_rows
+  ] if missing_sample_rows else []
 
   # c) Duplicate IDs in sink
   dup_count_sql = (
@@ -264,16 +273,15 @@ def validate_results(
   _LOGGER.info('Running duplicate IDs query...')
   dup_count_rows = run_validation_query(bq_wrapper, project, dup_count_sql)
   results['duplicate_count'] = (
-      int(_cell_val(dup_count_rows[0].f[0]))
-      if dup_count_rows else 0)
+      int(_cell_val(dup_count_rows[0].f[0])) if dup_count_rows else 0)
   dup_sample_sql = (
       f'SELECT id, COUNT(*) AS cnt '
       f'FROM `{sink_table}` GROUP BY id HAVING cnt > 1 '
       f'ORDER BY id LIMIT 10')
   dup_sample_rows = run_validation_query(bq_wrapper, project, dup_sample_sql)
   results['duplicate_sample'] = [
-      (int(_cell_val(r.f[0])), int(_cell_val(r.f[1])))
-      for r in dup_sample_rows] if dup_sample_rows else []
+      (int(_cell_val(r.f[0])), int(_cell_val(r.f[1]))) for r in dup_sample_rows
+  ] if dup_sample_rows else []
 
   # d) Extra IDs (in sink but not source) — count + sample
   extra_count_sql = (
@@ -282,11 +290,9 @@ def validate_results(
       f'EXCEPT DISTINCT '
       f'SELECT id FROM `{source_table}`)')
   _LOGGER.info('Running extra IDs query...')
-  extra_count_rows = run_validation_query(
-      bq_wrapper, project, extra_count_sql)
+  extra_count_rows = run_validation_query(bq_wrapper, project, extra_count_sql)
   results['extra_count'] = (
-      int(_cell_val(extra_count_rows[0].f[0]))
-      if extra_count_rows else 0)
+      int(_cell_val(extra_count_rows[0].f[0])) if extra_count_rows else 0)
   extra_sample_sql = (
       f'SELECT id FROM ('
       f'SELECT id FROM `{sink_table}` '
@@ -294,9 +300,8 @@ def validate_results(
       f'SELECT id FROM `{source_table}`) ORDER BY id LIMIT 10')
   extra_sample_rows = run_validation_query(
       bq_wrapper, project, extra_sample_sql)
-  results['extra_sample'] = [
-      int(_cell_val(r.f[0]))
-      for r in extra_sample_rows] if extra_sample_rows else []
+  results['extra_sample'] = [int(_cell_val(r.f[0])) for r in extra_sample_rows
+                             ] if extra_sample_rows else []
 
   # e) APPENDS() diagnostic — run APPENDS() now for the full reader window.
   #    Compares with source_count to detect APPENDS() visibility lag.
@@ -306,7 +311,8 @@ def validate_results(
     start_iso = _dt.datetime.fromtimestamp(
         start_time, tz=_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
     end_iso = _dt.datetime.fromtimestamp(
-        reader_stop_time, tz=_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+        reader_stop_time,
+        tz=_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
     appends_sql = (
         f"SELECT COUNT(*) FROM APPENDS("
         f"TABLE `{source_table}`, "
@@ -325,8 +331,7 @@ def validate_results(
   # Overall pass/fail
   results['all_pass'] = (
       results['source_count'] == results['sink_count'] and
-      results['missing_count'] == 0 and
-      results['duplicate_count'] == 0 and
+      results['missing_count'] == 0 and results['duplicate_count'] == 0 and
       results['extra_count'] == 0)
 
   return results
@@ -345,18 +350,23 @@ def delete_table(bq_wrapper, project, dataset, table):
 # Report
 # =============================================================================
 
+
 def print_report(args, source_fq, sink_fq, validation, duration_actual):
   """Print the final load test report."""
   print('\n' + '=' * 60)
   print('Load Test Report')
   print('=' * 60)
   print(f'  Runner:           {args.runner}')
-  print(f'  Duration:         {args.duration_sec}s (actual: {duration_actual:.1f}s)')
+  print(
+      f'  Duration:         {args.duration_sec}s (actual: {duration_actual:.1f}s)'
+  )
   row_size = f'~{args.payload_bytes + 50} bytes/row' if args.payload_bytes > 0 else '~50 bytes/row'
-  print(f'  Writer:           {args.rows_per_impulse} rows every '
-        f'{args.insert_interval_sec}s ({args.write_method}, {row_size})')
-  print(f'  Reader:           poll every {args.poll_interval_sec}s, '
-        f'buffer {args.buffer_sec}s, drain {args.drain_polls} polls')
+  print(
+      f'  Writer:           {args.rows_per_impulse} rows every '
+      f'{args.insert_interval_sec}s ({args.write_method}, {row_size})')
+  print(
+      f'  Reader:           poll every {args.poll_interval_sec}s, '
+      f'buffer {args.buffer_sec}s, drain {args.drain_polls} polls')
   print(f'  Sink:             {args.write_method}')
   print(f'  Source table:     {source_fq}')
   print(f'  Sink table:       {sink_fq}')
@@ -377,16 +387,19 @@ def print_report(args, source_fq, sink_fq, validation, duration_actual):
     print(f'    Source rows:      {src}')
     print(f'    Sink rows:        {snk}')
     print(f'    Row count match:  {"PASS" if count_match else "FAIL"}')
-    print(f'    Missing IDs:      {"PASS" if missing_count == 0 else "FAIL"} '
-          f'({missing_count})')
+    print(
+        f'    Missing IDs:      {"PASS" if missing_count == 0 else "FAIL"} '
+        f'({missing_count})')
     if missing_sample:
       print(f'      First 10: {missing_sample}')
-    print(f'    Duplicate IDs:    {"PASS" if dup_count == 0 else "FAIL"} '
-          f'({dup_count})')
+    print(
+        f'    Duplicate IDs:    {"PASS" if dup_count == 0 else "FAIL"} '
+        f'({dup_count})')
     if dup_sample:
       print(f'      First 10: {dup_sample}')
-    print(f'    Extra IDs:        {"PASS" if extra_count == 0 else "FAIL"} '
-          f'({extra_count})')
+    print(
+        f'    Extra IDs:        {"PASS" if extra_count == 0 else "FAIL"} '
+        f'({extra_count})')
     if extra_sample:
       print(f'      First 10: {extra_sample}')
 
@@ -399,18 +412,18 @@ def print_report(args, source_fq, sink_fq, validation, duration_actual):
       imm = flush_diag.get('source_count_immediate')
       if imm is not None:
         unflushed = src - imm
-        print(f'    Source rows (immediate):  {imm}'
-              f'  ({unflushed} unflushed at pipeline end)'
-              if unflushed > 0 else
-              f'    Source rows (immediate):  {imm}'
-              f'  (all flushed at pipeline end)')
+        print(
+            f'    Source rows (immediate):  {imm}'
+            f'  ({unflushed} unflushed at pipeline end)' if unflushed >
+            0 else f'    Source rows (immediate):  {imm}'
+            f'  (all flushed at pipeline end)')
       if appends_count is not None:
         gap = src - appends_count
-        print(f'    APPENDS() count (post-settle): {appends_count}'
-              f'  ({gap} not visible in APPENDS)'
-              if gap > 0 else
-              f'    APPENDS() count (post-settle): {appends_count}'
-              f'  (all visible in APPENDS)')
+        print(
+            f'    APPENDS() count (post-settle): {appends_count}'
+            f'  ({gap} not visible in APPENDS)' if gap >
+            0 else f'    APPENDS() count (post-settle): {appends_count}'
+            f'  (all visible in APPENDS)')
       # Interpretation
       if imm is not None and appends_count is not None:
         print()
@@ -437,6 +450,7 @@ def print_report(args, source_fq, sink_fq, validation, duration_actual):
 # Main
 # =============================================================================
 
+
 def parse_args():
   parser = argparse.ArgumentParser(
       description='Load test for ReadBigQueryChangeHistory.')
@@ -453,44 +467,58 @@ def parse_args():
 
   # Writer config
   parser.add_argument(
-      '--rows_per_impulse', type=int, default=3,
+      '--rows_per_impulse',
+      type=int,
+      default=3,
       help='Rows generated per PeriodicImpulse tick')
   parser.add_argument(
-      '--insert_interval_sec', type=float, default=5.0,
+      '--insert_interval_sec',
+      type=float,
+      default=5.0,
       help='Seconds between writer impulses')
   parser.add_argument(
-      '--payload_bytes', type=int, default=0,
+      '--payload_bytes',
+      type=int,
+      default=0,
       help='Size of random string padding per row (bytes). '
-           'Increases row size for exercising multi-stream reads.')
+      'Increases row size for exercising multi-stream reads.')
   parser.add_argument(
-      '--write_method', default='STREAMING_INSERTS',
+      '--write_method',
+      default='STREAMING_INSERTS',
       choices=['STREAMING_INSERTS', 'STORAGE_WRITE_API'],
       help='WriteToBigQuery method for writer branch')
 
   # Reader config
   parser.add_argument(
-      '--poll_interval_sec', type=int, default=30,
+      '--poll_interval_sec',
+      type=int,
+      default=30,
       help='Seconds between CDC polls')
   parser.add_argument(
-      '--buffer_sec', type=float, default=10.0,
+      '--buffer_sec',
+      type=float,
+      default=10.0,
       help='Safety buffer behind now() in seconds')
   parser.add_argument(
-      '--temp_dataset', default='beam_ch_temp',
+      '--temp_dataset',
+      default='beam_ch_temp',
       help='Dataset for CDC temp tables')
 
   # Duration
   parser.add_argument(
-      '--duration_sec', type=float, default=120.0,
+      '--duration_sec',
+      type=float,
+      default=120.0,
       help='How long to run (seconds)')
   parser.add_argument(
-      '--drain_polls', type=int, default=2,
+      '--drain_polls',
+      type=int,
+      default=2,
       help='Extra poll cycles after writer stops for reader to drain. '
-           'Dataflow needs more (8+) due to startup delay cascading backlog.')
+      'Dataflow needs more (8+) due to startup delay cascading backlog.')
 
   # Runner and Dataflow
-  parser.add_argument(
-      '--runner', default='PrismRunner',
-      help='Pipeline runner')
+  parser.add_argument('--runner', default='PrismRunner', help='Pipeline runner')
   parser.add_argument('--region', default='us-central1', help='Dataflow region')
   parser.add_argument('--temp_location', default=None, help='GCS temp location')
   parser.add_argument(
@@ -499,7 +527,9 @@ def parse_args():
   parser.add_argument(
       '--num_workers', type=int, default=1, help='Number of Dataflow workers')
   parser.add_argument(
-      '--max_num_workers', type=int, default=4,
+      '--max_num_workers',
+      type=int,
+      default=4,
       help='Max number of Dataflow workers')
   parser.add_argument(
       '--machine_type', default='n1-standard-2', help='Worker machine type')
@@ -507,15 +537,13 @@ def parse_args():
 
   # Control
   parser.add_argument(
-      '--keep_tables', action='store_true',
+      '--keep_tables',
+      action='store_true',
       help='Do not delete test tables after run')
   parser.add_argument(
-      '--skip_validation', action='store_true',
+      '--skip_validation',
+      action='store_true',
       help='Skip SQL validation (just run the pipeline)')
-  parser.add_argument(
-      '--trace', action='store_true',
-      help='Enable detailed CDC pipeline trace logging')
-
   args, pipeline_args = parser.parse_known_args()
 
   # Apply profile overrides (only for args not explicitly set on CLI)
@@ -537,7 +565,6 @@ def main():
 
   args, pipeline_args = parse_args()
 
-
   # Generate unique table names for this run
   run_id = uuid.uuid4().hex[:8]
   source_table_name = f'ch_load_src_{run_id}'
@@ -554,17 +581,19 @@ def main():
   _LOGGER.info('Runner: %s', args.runner)
   _LOGGER.info(
       'Writer: %d rows every %.1fs (%s)',
-      args.rows_per_impulse, args.insert_interval_sec, args.write_method)
+      args.rows_per_impulse,
+      args.insert_interval_sec,
+      args.write_method)
   _LOGGER.info(
       'Reader: poll every %ds, buffer %.1fs',
-      args.poll_interval_sec, args.buffer_sec)
+      args.poll_interval_sec,
+      args.buffer_sec)
   _LOGGER.info('Duration: %.0fs', args.duration_sec)
 
   # Create source table with change history enabled
   _LOGGER.info('Creating source table...')
   bq_wrapper = BigQueryWrapper()
-  create_source_table(
-      bq_wrapper, args.project, args.dataset, source_table_name)
+  create_source_table(bq_wrapper, args.project, args.dataset, source_table_name)
 
   # Build pipeline options
   options = PipelineOptions(pipeline_args)
@@ -577,7 +606,8 @@ def main():
     if args.temp_location:
       options.view_as(GoogleCloudOptions).temp_location = args.temp_location
     if args.staging_location:
-      options.view_as(GoogleCloudOptions).staging_location = args.staging_location
+      options.view_as(
+          GoogleCloudOptions).staging_location = args.staging_location
     if args.job_name:
       options.view_as(GoogleCloudOptions).job_name = args.job_name
     options.view_as(WorkerOptions).num_workers = args.num_workers
@@ -595,13 +625,15 @@ def main():
   # creating a cascading delay. Extra drain polls account for this.
   start_time = time.time()
   writer_stop_time = start_time + args.duration_sec
-  reader_stop_time = (writer_stop_time +
-                      args.drain_polls * args.poll_interval_sec +
-                      args.buffer_sec)
+  reader_stop_time = (
+      writer_stop_time + args.drain_polls * args.poll_interval_sec +
+      args.buffer_sec)
 
   _LOGGER.info(
       'Launching pipeline (start=%.1f, writer_stop=%.1f, reader_stop=%.1f)...',
-      start_time, writer_stop_time, reader_stop_time)
+      start_time,
+      writer_stop_time,
+      reader_stop_time)
 
   pipeline_start = time.time()
   with beam.Pipeline(options=options) as p:
@@ -636,8 +668,7 @@ def main():
             change_function='APPENDS',
             buffer_sec=args.buffer_sec,
             project=args.project,
-            temp_dataset=args.temp_dataset,
-            trace=True)
+            temp_dataset=args.temp_dataset)
         | 'CoerceDatetimes' >> beam.Map(_coerce_datetimes)
         | 'WriteSink' >> beam.io.WriteToBigQuery(
             table=sink_beam,
@@ -656,7 +687,8 @@ def main():
   if not args.skip_validation:
     _LOGGER.info('Querying source table immediately (no settle wait)...')
     immediate_sql = f'SELECT COUNT(*) FROM `{source_fq}`'
-    immediate_rows = run_validation_query(bq_wrapper, args.project, immediate_sql)
+    immediate_rows = run_validation_query(
+        bq_wrapper, args.project, immediate_sql)
     flush_diag['source_count_immediate'] = (
         int(_cell_val(immediate_rows[0].f[0])) if immediate_rows else 0)
     _LOGGER.info(
@@ -672,8 +704,12 @@ def main():
 
     _LOGGER.info('Running validation queries...')
     validation = validate_results(
-        bq_wrapper, args.project, source_fq, sink_fq,
-        start_time=start_time, reader_stop_time=reader_stop_time)
+        bq_wrapper,
+        args.project,
+        source_fq,
+        sink_fq,
+        start_time=start_time,
+        reader_stop_time=reader_stop_time)
     validation['flush_diag'] = flush_diag
 
   # Report
@@ -683,10 +719,12 @@ def main():
   if args.runner == 'DataflowRunner' and args.job_name:
     print()
     print('Dataflow commands:')
-    print(f'  gcloud dataflow jobs describe {args.job_name} '
-          f'--project={args.project} --region={args.region}')
-    print(f'  gcloud dataflow metrics list {args.job_name} '
-          f'--project={args.project} --region={args.region}')
+    print(
+        f'  gcloud dataflow jobs describe {args.job_name} '
+        f'--project={args.project} --region={args.region}')
+    print(
+        f'  gcloud dataflow metrics list {args.job_name} '
+        f'--project={args.project} --region={args.region}')
 
   # Cleanup
   if not args.keep_tables:
@@ -698,8 +736,12 @@ def main():
         'Keeping tables (--keep_tables). Clean up manually:\n'
         '  bq rm -f %s.%s.%s\n'
         '  bq rm -f %s.%s.%s',
-        args.project, args.dataset, source_table_name,
-        args.project, args.dataset, sink_table_name)
+        args.project,
+        args.dataset,
+        source_table_name,
+        args.project,
+        args.dataset,
+        sink_table_name)
 
   if validation and not validation['all_pass']:
     return 1
