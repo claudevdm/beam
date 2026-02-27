@@ -40,8 +40,7 @@ Example usage::
               field='transaction_amount', agg=AggOp.SUM, alias='revenue')],
       ),
   )
-  result = cdc_rows | ComputeMetric(spec) | AnomalyDetection(
-      ZScore(features=['value']))
+  result = cdc_rows | ComputeMetric(spec) | AnomalyDetection(ZScore())
 
   # CUJ 2: CTR grouped by dimensions
   spec = MetricSpec(
@@ -178,7 +177,6 @@ class MetricSpec:
     derived_fields: Optional pre-aggregation derived fields.
     measure_combiner: Optional post-aggregation ``Expr`` operating on measure
       aliases. Required when there are multiple measures.
-    output_field: Name of the output field in the resulting beam.Row.
   """
   def __init__(
       self,
@@ -186,13 +184,11 @@ class MetricSpec:
       aggregation,
       derived_fields=None,
       measure_combiner=None,
-      output_field='value',
   ):
     self.name = name
     self.aggregation = aggregation
     self.derived_fields = derived_fields or []
     self.measure_combiner = measure_combiner
-    self.output_field = output_field
     self._validate()
 
   def _validate(self):
@@ -241,7 +237,6 @@ class MetricSpec:
                 'field': m.field, 'agg': m.agg.value, 'alias': m.alias
             } for m in self.aggregation.measures],
         },
-        'output_field': self.output_field,
     }
     if self.derived_fields:
       result['derived_fields'] = [{
@@ -316,7 +311,6 @@ class MetricSpec:
         ),
         derived_fields=derived_fields,
         measure_combiner=measure_combiner,
-        output_field=d.get('output_field', 'value'),
         _run_init=True,
     )
 
@@ -361,9 +355,8 @@ class _DerivedFieldsFn:
 
 class _ApplyMetricExpr(beam.DoFn):
   """DoFn that evaluates a post-aggregation expression on combined results."""
-  def __init__(self, measure_combiner, output_field, is_keyed):
+  def __init__(self, measure_combiner, is_keyed):
     self._measure_combiner = measure_combiner
-    self._output_field = output_field
     self._is_keyed = is_keyed
 
   def process(self, element, window=beam.DoFn.WindowParam):
@@ -378,7 +371,7 @@ class _ApplyMetricExpr(beam.DoFn):
       value = float(next(iter(agg_dict.values())))
 
     row = beam.Row(
-        **{self._output_field: value},
+        value=value,
         window_start=float(window.start),
         window_end=float(window.end))
 
@@ -460,8 +453,7 @@ class ComputeMetric(beam.PTransform):
           | 'ToDict' >> beam.Map(to_alias_dict))
 
     # Step 4: Apply metric expression and set output type hints
-    metric_dofn = _ApplyMetricExpr(
-        spec.measure_combiner, spec.output_field, is_keyed)
+    metric_dofn = _ApplyMetricExpr(spec.measure_combiner, is_keyed)
 
     if is_keyed:
       # AnomalyDetection checks isinstance(element_type, TupleConstraint)

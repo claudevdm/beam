@@ -129,37 +129,25 @@ class ParseMetricSpecTest(unittest.TestCase):
 class ParseDetectorSpecTest(unittest.TestCase):
   """Test _parse_detector_spec from JSON strings."""
   def test_zscore_default(self):
-    spec_json = json.dumps({
-        'type': 'ZScore',
-        'config': {
-            'features': ['value']
-        },
-    })
+    spec_json = json.dumps({'type': 'ZScore'})
     detector = _parse_detector_spec(spec_json)
     from apache_beam.ml.anomaly.detectors.zscore import ZScore
     self.assertIsInstance(detector, ZScore)
+    self.assertEqual(detector._features, ['value'])
 
   def test_iqr_detector(self):
-    spec_json = json.dumps({
-        'type': 'IQR',
-        'config': {
-            'features': ['value']
-        },
-    })
+    spec_json = json.dumps({'type': 'IQR'})
     detector = _parse_detector_spec(spec_json)
     from apache_beam.ml.anomaly.detectors.iqr import IQR
     self.assertIsInstance(detector, IQR)
+    self.assertEqual(detector._features, ['value'])
 
   def test_robust_zscore_detector(self):
-    spec_json = json.dumps({
-        'type': 'RobustZScore',
-        'config': {
-            'features': ['value']
-        },
-    })
+    spec_json = json.dumps({'type': 'RobustZScore'})
     detector = _parse_detector_spec(spec_json)
     from apache_beam.ml.anomaly.detectors.robust_zscore import RobustZScore
     self.assertIsInstance(detector, RobustZScore)
+    self.assertEqual(detector._features, ['value'])
 
   def test_unknown_detector_raises(self):
     spec_json = json.dumps({
@@ -177,6 +165,76 @@ class ParseDetectorSpecTest(unittest.TestCase):
     detector = _parse_detector_spec(spec_json)
     from apache_beam.ml.anomaly.detectors.zscore import ZScore
     self.assertIsInstance(detector, ZScore)
+
+  def test_zscore_window_size(self):
+    spec_json = json.dumps({
+        'type': 'ZScore',
+        'config': {
+            'window_size': 500
+        },
+    })
+    detector = _parse_detector_spec(spec_json)
+    from apache_beam.ml.anomaly.detectors.zscore import ZScore
+    self.assertIsInstance(detector, ZScore)
+    self.assertEqual(detector._sub_stat_tracker._window_size, 500)
+    self.assertEqual(detector._stdev_tracker._window_size, 500)
+
+  def test_iqr_window_size(self):
+    spec_json = json.dumps({
+        'type': 'IQR',
+        'config': {
+            'window_size': 200
+        },
+    })
+    detector = _parse_detector_spec(spec_json)
+    from apache_beam.ml.anomaly.detectors.iqr import IQR
+    self.assertIsInstance(detector, IQR)
+    self.assertEqual(detector._q1_tracker._window_size, 200)
+
+  def test_robust_zscore_window_size(self):
+    spec_json = json.dumps({
+        'type': 'RobustZScore',
+        'config': {
+            'window_size': 300
+        },
+    })
+    detector = _parse_detector_spec(spec_json)
+    from apache_beam.ml.anomaly.detectors.robust_zscore import RobustZScore
+    self.assertIsInstance(detector, RobustZScore)
+    self.assertEqual(
+        detector._mad_tracker._median_tracker._quantile_tracker._window_size,
+        300)
+    self.assertEqual(
+        detector._mad_tracker._diff_median_tracker._quantile_tracker.
+        _window_size,
+        300)
+
+  def test_window_size_does_not_override_explicit_tracker(self):
+    """If a user sets both window_size and an explicit tracker, the explicit
+    tracker takes precedence."""
+    spec_json = json.dumps({
+        'type': 'ZScore',
+        'config': {
+            'window_size': 500,
+            'sub_stat_tracker': {
+                'type': 'IncSlidingMeanTracker', 'config': {
+                    'window_size': 100
+                }
+            },
+        },
+    })
+    detector = _parse_detector_spec(spec_json)
+    # Explicit tracker wins over window_size shorthand
+    self.assertEqual(detector._sub_stat_tracker._window_size, 100)
+    # stdev_tracker gets the shorthand value since it wasn't set explicitly
+    self.assertEqual(detector._stdev_tracker._window_size, 500)
+
+  def test_zscore_default_window_size(self):
+    """Without window_size, detectors use the default (1000)."""
+    spec_json = json.dumps({'type': 'ZScore'})
+    detector = _parse_detector_spec(spec_json)
+    self.assertEqual(detector._sub_stat_tracker._window_size, 1000)
+    self.assertEqual(detector._stdev_tracker._window_size, 1000)
 
 
 class AnomalyMonitorOptionsTest(unittest.TestCase):
@@ -258,12 +316,7 @@ class EndToEndPipelineTest(unittest.TestCase):
             ],
         },
     })
-    detector_json = json.dumps({
-        'type': 'ZScore',
-        'config': {
-            'features': ['value']
-        },
-    })
+    detector_json = json.dumps({'type': 'ZScore'})
     metric_spec = _parse_metric_spec(metric_json)
     detector = _parse_detector_spec(detector_json)
 
@@ -306,12 +359,7 @@ class EndToEndPipelineTest(unittest.TestCase):
             'expression': 'clicks / impressions'
         },
     })
-    detector_json = json.dumps({
-        'type': 'ZScore',
-        'config': {
-            'features': ['value']
-        },
-    })
+    detector_json = json.dumps({'type': 'ZScore'})
     metric_spec = _parse_metric_spec(metric_json)
     detector = _parse_detector_spec(detector_json)
 
@@ -375,12 +423,7 @@ class EndToEndPipelineTest(unittest.TestCase):
             'expression': 'successes / total'
         },
     })
-    detector_json = json.dumps({
-        'type': 'ZScore',
-        'config': {
-            'features': ['value']
-        },
-    })
+    detector_json = json.dumps({'type': 'ZScore'})
     metric_spec = _parse_metric_spec(metric_json)
     detector = _parse_detector_spec(detector_json)
 
@@ -438,10 +481,11 @@ class SpecRoundTripFromGcloudTest(unittest.TestCase):
 
   def test_detector_spec_as_gcloud_parameter(self):
     """Simulate detector spec from gcloud --parameters."""
-    json_str = '{"type":"ZScore","config":{"features":["value"]}}'
+    json_str = '{"type":"ZScore"}'
     detector = _parse_detector_spec(json_str)
     from apache_beam.ml.anomaly.detectors.zscore import ZScore
     self.assertIsInstance(detector, ZScore)
+    self.assertEqual(detector._features, ['value'])
 
 
 if __name__ == '__main__':

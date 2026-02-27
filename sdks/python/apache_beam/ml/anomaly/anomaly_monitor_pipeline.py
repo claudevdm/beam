@@ -28,7 +28,7 @@ Usage (Flex Template)::
         --template-file-gcs-location "gs://bucket/anomaly_monitor.json" \\
         --parameters table="project:dataset.table" \\
         --parameters metric_spec='{"name":"revenue","aggregation":{"window":{"type":"fixed","size_seconds":3600},"measures":[{"field":"transaction_amount","agg":"SUM","alias":"revenue"}]}}' \\
-        --parameters detector_spec='{"type":"ZScore","config":{"features":["value"]}}' \\
+        --parameters detector_spec='{"type":"ZScore"}' \\
         --region us-central1
 
 Usage (PrismRunner)::
@@ -36,7 +36,7 @@ Usage (PrismRunner)::
     python -m apache_beam.ml.anomaly.anomaly_monitor_pipeline \\
         --table=project:dataset.table \\
         --metric_spec='{"name":"revenue","aggregation":{"window":{"type":"fixed","size_seconds":3600},"measures":[{"field":"transaction_amount","agg":"SUM","alias":"revenue"}]}}' \\
-        --detector_spec='{"type":"ZScore","config":{"features":["value"]}}' \\
+        --detector_spec='{"type":"ZScore"}' \\
         --runner=PrismRunner
 
 Usage (DataflowRunner)::
@@ -62,8 +62,7 @@ Top-level ``metric_spec`` object::
       "name": "<metric_name>",
       "aggregation": { ... },           # required
       "derived_fields": [ ... ],         # optional, pre-aggregation
-      "measure_combiner": { ... },       # optional (required if >1 measure)
-      "output_field": "value"            # optional, default "value"
+      "measure_combiner": { ... }        # optional (required if >1 measure)
     }
 
 aggregation
@@ -135,25 +134,36 @@ The ``type`` must be a registered ``@specifiable`` detector class name.
 Common AnomalyDetector parameters (all detectors)::
 
     "config": {
-      "features": ["value"],                # input feature names (required)
       "threshold_criterion": { ... },       # optional, see below
       "model_id": "<string>"                # optional detector ID
     }
+
+``features`` is automatically set to ``['value']`` to match
+``ComputeMetric`` output; it does not need to be specified.
+
+window_size
+-----------
+All detectors maintain an internal sliding window of recent values for their
+statistical trackers (mean, stdev, quantiles, etc.).  The default is 1000
+data points.  Use ``window_size`` as a shorthand to override this for all
+internal trackers at once::
+
+    {"type": "ZScore", "config": {"window_size": 500}}
 
 Available detectors
 -------------------
 
 **ZScore** — ``|value - mean| / stdev`` (default threshold: 3)::
 
-    {"type": "ZScore", "config": {"features": ["value"]}}
+    {"type": "ZScore"}
 
 **IQR** — Interquartile Range (default threshold: 1.5)::
 
-    {"type": "IQR", "config": {"features": ["value"]}}
+    {"type": "IQR"}
 
 **RobustZScore** — Modified Z-Score using median/MAD (default threshold: 3.5)::
 
-    {"type": "RobustZScore", "config": {"features": ["value"]}}
+    {"type": "RobustZScore"}
 
 threshold_criterion
 -------------------
@@ -183,17 +193,17 @@ Examples
 Simple SUM metric with ZScore::
 
     --metric_spec='{"name":"revenue","aggregation":{"window":{"type":"fixed","size_seconds":3600},"measures":[{"field":"transaction_amount","agg":"SUM","alias":"revenue"}]}}'
-    --detector_spec='{"type":"ZScore","config":{"features":["value"]}}'
+    --detector_spec='{"type":"ZScore"}'
 
 Grouped ratio metric (CTR) with ZScore::
 
     --metric_spec='{"name":"ctr","aggregation":{"window":{"type":"fixed","size_seconds":10},"group_by":["campaign_type","browser_version"],"measures":[{"field":"is_click","agg":"SUM","alias":"clicks"},{"field":"is_click","agg":"COUNT","alias":"impressions"}]},"measure_combiner":{"expression":"clicks / impressions"}}'
-    --detector_spec='{"type":"ZScore","config":{"features":["value"]}}'
+    --detector_spec='{"type":"ZScore"}'
 
 Derived field + ratio + custom threshold::
 
     --metric_spec='{"name":"success_rate","derived_fields":[{"name":"is_success","expression":"1 if status == \'success\' else 0"}],"aggregation":{"window":{"type":"fixed","size_seconds":10},"group_by":["brand_name","category"],"measures":[{"field":"is_success","agg":"SUM","alias":"successes"},{"field":"is_success","agg":"COUNT","alias":"total"}]},"measure_combiner":{"expression":"successes / total"}}'
-    --detector_spec='{"type":"ZScore","config":{"features":["value"],"threshold_criterion":{"type":"FixedThreshold","config":{"cutoff":10}}}}'
+    --detector_spec='{"type":"ZScore","config":{"threshold_criterion":{"type":"FixedThreshold","config":{"cutoff":10}}}}'
 """
 
 import datetime
@@ -284,7 +294,8 @@ class AnomalyMonitorOptions(PipelineOptions):
         '--detector_spec',
         default=None,
         help='JSON string defining the anomaly detector. '
-        'Format: {"type":"ZScore","config":{"features":["value"]}}')
+        'Format: {"type":"ZScore"} or '
+        '{"type":"ZScore","config":{"threshold_criterion":{...}}}')
     parser.add_argument(
         '--poll_interval_sec',
         type=int,
@@ -341,24 +352,108 @@ def _dict_to_spec(d):
   return d
 
 
+def _expand_window_size(d):
+  """Expand ``window_size`` shorthand into detector-specific tracker configs.
+
+  Instead of constructing deeply nested tracker specs, users can write::
+
+      {"type": "ZScore", "config": {"window_size": 500}}
+
+  This expands into the full nested tracker configuration that each detector
+  type expects.  If the user already set explicit tracker configs, those take
+  precedence (``setdefault`` semantics).
+  """
+  config = d.get('config', {})
+  ws = config.pop('window_size', None)
+  if ws is None:
+    return
+
+  detector_type = d['type']
+
+  if detector_type == 'ZScore':
+    config.setdefault(
+        'sub_stat_tracker', {
+            'type': 'IncSlidingMeanTracker', 'config': {
+                'window_size': ws
+            }
+        })
+    config.setdefault(
+        'stdev_tracker', {
+            'type': 'IncSlidingStdevTracker', 'config': {
+                'window_size': ws
+            }
+        })
+  elif detector_type == 'IQR':
+    config.setdefault(
+        'q1_tracker',
+        {
+            'type': 'BufferedSlidingQuantileTracker',
+            'config': {
+                'window_size': ws, 'q': 0.25
+            }
+        })
+    # q3_tracker auto-derives from q1_tracker in IQR.__init__
+  elif detector_type == 'RobustZScore':
+    _median_tracker_spec = {
+        'type': 'MedianTracker',
+        'config': {
+            'quantile_tracker': {
+                'type': 'BufferedSlidingQuantileTracker',
+                'config': {
+                    'window_size': ws, 'q': 0.5
+                }
+            }
+        }
+    }
+    config.setdefault(
+        'mad_tracker',
+        {
+            'type': 'MadTracker',
+            'config': {
+                'median_tracker': _median_tracker_spec,
+                'diff_median_tracker': {
+                    'type': 'MedianTracker',
+                    'config': {
+                        'quantile_tracker': {
+                            'type': 'BufferedSlidingQuantileTracker',
+                            'config': {
+                                'window_size': ws, 'q': 0.5
+                            }
+                        }
+                    }
+                }
+            }
+        })
+
+
 def _parse_detector_spec(json_str):
   """Parse an anomaly detector from a JSON Spec string.
 
   The JSON should have the form::
 
-      {"type": "ZScore", "config": {"features": ["value"]}}
+      {"type": "ZScore"}
 
   Nested specifiable objects (e.g. ``threshold_criterion``) are supported::
 
       {"type": "ZScore", "config": {
-          "features": ["value"],
           "threshold_criterion": {"type": "FixedThreshold", "config": {"cutoff": 10}}
       }}
 
+  A ``window_size`` shorthand sets the history buffer for all internal
+  trackers::
+
+      {"type": "ZScore", "config": {"window_size": 500}}
+
   The ``type`` field must match a registered @specifiable detector class
   (e.g. ZScore, IQR, RobustZScore).
+
+  ``features`` is automatically set to ``['value']`` to match the output of
+  ``ComputeMetric``. Any user-supplied ``features`` is overwritten.
   """
   d = json.loads(json_str)
+  d.setdefault('config', {})
+  d['config']['features'] = ['value']
+  _expand_window_size(d)
   spec = _dict_to_spec(d)
   return Specifiable.from_spec(spec, _run_init=True)
 
@@ -424,8 +519,6 @@ def run(argv=None):
   for required_opt in ('table', 'metric_spec', 'detector_spec'):
     if getattr(monitor_options, required_opt) is None:
       raise ValueError(f'--{required_opt} is required')
-
-  options.view_as(SetupOptions).save_main_session = True
 
   with beam.Pipeline(options=options) as p:
     build_pipeline(p, monitor_options)
