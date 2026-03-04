@@ -706,6 +706,51 @@ class SdkWorker(object):
           delayed_applications, requests_finalization = (
               bundle_processor.process_bundle(instruction_id))
           monitoring_infos = bundle_processor.monitoring_infos()
+          # DEBUG: Log state sampler diagnostics
+          _LOGGER.info(
+              'SAMPLER_INFO instruction=%s FAST_SAMPLER=%s sampler_type=%s',
+              instruction_id,
+              statesampler.FAST_SAMPLER,
+              type(bundle_processor.state_sampler).__mro__)
+          _sampler = bundle_processor.state_sampler
+          _unknown_nsecs = 0
+          if hasattr(_sampler, '_states_by_name'):
+            for _sname, _sstate in _sampler._states_by_name.items():
+              _LOGGER.info(
+                  'STATE_DETAIL instruction=%s state=%s nsecs=%d msecs=%d',
+                  instruction_id,
+                  _sname,
+                  _sstate.nsecs,
+                  _sstate.sampled_msecs_int())
+          # Check the unknown/initial state (index 0)
+          try:
+            _unknown = _sampler.scoped_states_by_index[0]
+            _LOGGER.info(
+                'UNKNOWN_STATE instruction=%s nsecs=%d msecs=%d '
+                'transition_count=%d',
+                instruction_id,
+                _unknown.nsecs,
+                _unknown.sampled_msecs_int(),
+                _sampler.state_transition_count)
+          except Exception as _e:
+            _LOGGER.info('UNKNOWN_STATE error: %s', _e)
+          for mi in monitoring_infos:
+            if 'msecs' in mi.urn:
+              val = 0
+              if mi.payload:
+                b = mi.payload
+                shift = 0
+                for byte in b:
+                  val |= (byte & 0x7F) << shift
+                  if not (byte & 0x80):
+                    break
+                  shift += 7
+              _LOGGER.info(
+                  'EXEC_TIME instruction=%s transform=%s urn=%s value=%dms',
+                  instruction_id,
+                  mi.labels.get('PTRANSFORM', '?'),
+                  mi.urn,
+                  val)
           response = beam_fn_api_pb2.InstructionResponse(
               instruction_id=instruction_id,
               process_bundle=beam_fn_api_pb2.ProcessBundleResponse(

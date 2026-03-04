@@ -72,11 +72,11 @@ def run(argv=None, save_main_session=True) -> PipelineResult:
       dest='input',
       default='gs://dataflow-samples/shakespeare/kinglear.txt',
       help='Input file to process.')
-  parser.add_argument(
-      '--output',
-      dest='output',
-      required=True,
-      help='Output file to write results to.')
+  # parser.add_argument(
+  #     '--output',
+  #     dest='output',
+  #     required=True,
+  #     help='Output file to write results to.')
   known_args, pipeline_args = parser.parse_known_args(argv)
 
   # We use the save_main_session option because one or more DoFn's in this
@@ -103,7 +103,7 @@ def run(argv=None, save_main_session=True) -> PipelineResult:
 
   # Write the output using a "Write" transform that has side effects.
   # pylint: disable=expression-not-assigned
-  output | 'Write' >> WriteToText(known_args.output)
+  output | 'Log' >> beam.LogElements()
 
   # Execute the pipeline and return the result.
   result = pipeline.run()
