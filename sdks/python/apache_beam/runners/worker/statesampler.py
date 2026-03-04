@@ -33,7 +33,10 @@ from apache_beam.utils.counters import CounterName
 try:
   from apache_beam.runners.worker import statesampler_fast as statesampler_impl  # type: ignore
   FAST_SAMPLER = True
-except ImportError:
+except ImportError as e:
+  import logging as _logging
+  _logging.getLogger(__name__).warning(
+      'Failed to import statesampler_fast, falling back to slow sampler: %s', e)
   from apache_beam.runners.worker import statesampler_slow as statesampler_impl
   FAST_SAMPLER = False
 
