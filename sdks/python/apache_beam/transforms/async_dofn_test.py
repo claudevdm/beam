@@ -61,6 +61,47 @@ class MultiElementDoFn(beam.DoFn):
     yield element
 
 
+# Always raises when processing an element. Used to verify that a future which
+# finishes by raising does not poison commit_finished_items.
+class AlwaysFailDoFn(beam.DoFn):
+  def __init__(self):
+    self.attempts = 0
+    self.lock = Lock()
+
+  def process(self, element):
+    with self.lock:
+      self.attempts += 1
+    raise ValueError('boom processing %s' % (element, ))
+    # Unreachable, but makes this a generator function so it matches the
+    # iteration path used by the wrapper for both sync and asyncio modes.
+    yield element  # pylint: disable=unreachable
+
+  def getAttempts(self):
+    with self.lock:
+      return self.attempts
+
+
+# Raises the first time it sees a given element value and succeeds on every
+# subsequent attempt. Used to verify that a transient failure is retried via
+# rescheduling and eventually produces output.
+class FailOnceDoFn(beam.DoFn):
+  def __init__(self):
+    self.attempts = {}
+    self.lock = Lock()
+
+  def process(self, element):
+    with self.lock:
+      seen = self.attempts.get(element[1], 0)
+      self.attempts[element[1]] = seen + 1
+    if seen == 0:
+      raise ValueError('transient failure processing %s' % (element, ))
+    yield element
+
+  def getAttempts(self, value):
+    with self.lock:
+      return self.attempts.get(value, 0)
+
+
 class FakeBagState:
   def __init__(self, items):
     self.items = items
@@ -296,6 +337,99 @@ class AsyncTest(unittest.TestCase):
     result = async_dofn.commit_finished_items(fake_bag_state, fake_timer)
     self.check_output(result, [msg, msg, ('key', 'bundle end')])
     self.assertEqual(fake_bag_state.items, [])
+
+  def test_failed_item_does_not_poison_commit(self):
+    # A future that finishes by raising must not blow up commit_finished_items.
+    # Previously future.result() re-raised, aborting the whole timer callback
+    # before the element was cleaned up -- leaving the terminal failed future in
+    # processing state so every subsequent timer firing re-raised (a poison
+    # pill). The element must instead stay in bag state and be rescheduled.
+    dofn = AlwaysFailDoFn()
+    async_dofn = async_lib.AsyncWrapper(dofn, use_asyncio=self.use_asyncio)
+    async_dofn.setup()
+    fake_bag_state = FakeBagState([])
+    fake_timer = FakeTimer(0)
+    msg = ('key1', 1)
+    async_dofn.process(msg, to_process=fake_bag_state, timer=fake_timer)
+
+    # Wait for the (failing) future to finish.
+    self.wait_for_empty(async_dofn)
+    attempts_before = dofn.getAttempts()
+    self.assertGreaterEqual(attempts_before, 1)
+
+    # Committing must not raise even though the future failed.
+    result = async_dofn.commit_finished_items(fake_bag_state, fake_timer)
+    # No output is produced for the failed item.
+    self.check_output(result, [])
+    # The element is retained in durable state (exactly-once: it never produced
+    # output so it must not be removed) and is rescheduled for reprocessing.
+    self.assertEqual(fake_bag_state.items, [msg])
+    # The dead future was removed from processing state and the element was
+    # resubmitted, so a fresh attempt was made.
+    self.wait_for_empty(async_dofn, timeout=20)
+    self.assertGreater(dofn.getAttempts(), attempts_before)
+
+    # A second commit must also not raise (proving it is not a poison pill).
+    result = async_dofn.commit_finished_items(fake_bag_state, fake_timer)
+    self.check_output(result, [])
+    self.assertEqual(fake_bag_state.items, [msg])
+
+  def test_failed_item_eventually_succeeds_on_retry(self):
+    # A transient failure (fails once, then succeeds) should be retried via
+    # rescheduling and eventually produce output, with the element finally
+    # removed from bag state.
+    dofn = FailOnceDoFn()
+    async_dofn = async_lib.AsyncWrapper(dofn, use_asyncio=self.use_asyncio)
+    async_dofn.setup()
+    fake_bag_state = FakeBagState([])
+    fake_timer = FakeTimer(0)
+    msg = ('key1', 1)
+    async_dofn.process(msg, to_process=fake_bag_state, timer=fake_timer)
+
+    # First attempt fails; commit reschedules the element without raising.
+    self.wait_for_empty(async_dofn)
+    result = async_dofn.commit_finished_items(fake_bag_state, fake_timer)
+    self.check_output(result, [])
+    self.assertEqual(fake_bag_state.items, [msg])
+
+    # The rescheduled (second) attempt succeeds; commit now outputs the element.
+    self.wait_for_empty(async_dofn, timeout=20)
+    result = async_dofn.commit_finished_items(fake_bag_state, fake_timer)
+    self.check_output(result, [msg])
+    self.assertEqual(fake_bag_state.items, [])
+    self.assertEqual(dofn.getAttempts(1), 2)
+
+  def test_failed_item_does_not_block_sibling(self):
+    # A failing element for a key must not prevent a sibling (good) element for
+    # the same key from being output in the same commit. Because a thrown
+    # exception would roll back the whole bundle, the sibling's output would be
+    # lost; rescheduling the failed item keeps the good item flowing.
+    fail_dofn = AlwaysFailDoFn()
+    async_dofn = async_lib.AsyncWrapper(fail_dofn, use_asyncio=self.use_asyncio)
+    async_dofn.setup()
+    fake_bag_state = FakeBagState([])
+    fake_timer = FakeTimer(0)
+    bad_msg = ('key1', 'bad')
+
+    # Schedule the failing item and wait for it to fail.
+    async_dofn.process(bad_msg, to_process=fake_bag_state, timer=fake_timer)
+    self.wait_for_empty(async_dofn)
+
+    # Swap the wrapped fn out for one that succeeds and schedule a good sibling.
+    # (Same key so both are visited in one commit.) Using a distinct id keeps
+    # the two elements separate in processing state.
+    good_msg = ('key1', 'good')
+    async_dofn._sync_fn = BasicDofn()
+    async_dofn.schedule_item(good_msg)
+    fake_bag_state.add(good_msg)
+    self.wait_for_empty(async_dofn, timeout=20)
+
+    # Commit must output the good sibling and not raise on the failed item.
+    result = async_dofn.commit_finished_items(fake_bag_state, fake_timer)
+    self.check_output(result, [good_msg])
+    # The good item is committed out of durable state; the bad item is retained
+    # for retry.
+    self.assertEqual(fake_bag_state.items, [bad_msg])
 
   def test_duplicates(self):
     # Test that async will produce a single output when a given input is sent

@@ -439,10 +439,15 @@ class AsyncWrapper(beam.DoFn):
       A list of elements that have finished processing for this key.
     """
     # For all elements that are in processing state:
-    # If the element is done processing, delete it from all state and yield the
-    # output.
-    # If the element is not yet done, print it. If the element is not in
-    # local state, schedule it for processing.
+    # If the element is done processing successfully, delete it from all state
+    # and yield the output.
+    # If the element finished by raising (or was cancelled) leave it in durable
+    # state and reschedule it for reprocessing.  We must not let the exception
+    # propagate: doing so aborts the whole timer callback before the terminal
+    # future is cleared, so every subsequent firing re-raises the same stored
+    # exception (a poison pill) and the key makes no progress.
+    # If the element is not yet done, leave it.  If the element is not in local
+    # state, schedule it for processing.
     items_finished = 0
     items_not_yet_finished = 0
     items_rescheduled = 0
@@ -489,10 +494,32 @@ class AsyncWrapper(beam.DoFn):
         if x_id in processing_elements:
           _, future = processing_elements[x_id]
           if future.done():
-            to_return.append(future.result())
-            finished_items.append(x)
-            processing_elements.pop(x_id)
-            items_finished += 1
+            # future.cancelled() is checked first because calling result()/
+            # exception() on a cancelled future raises CancelledError (a
+            # BaseException), which would itself escape this method.  The 'or'
+            # short-circuits so exception() is only called when not cancelled.
+            if future.cancelled() or future.exception() is not None:
+              # The element produced no valid output, so under the exactly-once
+              # contract it must stay in durable state (it is not added to
+              # finished_items and so is re-added to to_process below).  Drop
+              # the dead future and reschedule the element for a fresh attempt,
+              # exactly as we do for an element that was lost from local state.
+              if future.cancelled():
+                logging.warning(
+                    'item %s was cancelled before commit, rescheduling', x)
+              else:
+                logging.error(
+                    'processing failed for item %s, rescheduling for retry',
+                    x,
+                    exc_info=future.exception())
+              processing_elements.pop(x_id)
+              to_reschedule.append(x)
+              items_rescheduled += 1
+            else:
+              to_return.append(future.result())
+              finished_items.append(x)
+              processing_elements.pop(x_id)
+              items_finished += 1
           else:
             items_not_yet_finished += 1
         else:
