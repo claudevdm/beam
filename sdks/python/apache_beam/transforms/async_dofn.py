@@ -137,6 +137,15 @@ class AsyncWrapper(beam.DoFn):
     self.max_wait_time = max_wait_time
     self._shared_handle = Shared()
 
+  def _element_id(self, element):
+    """Returns the identity used to track an in-flight element.
+
+    The durable to_process state is per-key, so the identity must include
+    the key: two elements on different keys whose values share an id must
+    not alias each other. id_fn intentionally only sees the value.
+    """
+    return (element[0], self._id_fn(element[1]))
+
   @staticmethod
   def initialize_pool(parallelism):
     return lambda: ThreadPoolExecutor(max_workers=parallelism)
@@ -304,7 +313,7 @@ class AsyncWrapper(beam.DoFn):
       True if the item was scheduled False otherwise.
     """
     with AsyncWrapper._lock:
-      element_id = self._id_fn(element[1])
+      element_id = self._element_id(element)
       if element_id in AsyncWrapper._processing_elements[self._uuid]:
         logging.info('item %s already in processing elements', element)
         return True
@@ -467,7 +476,7 @@ class AsyncWrapper(beam.DoFn):
     # key.
     with AsyncWrapper._lock:
       processing_elements = AsyncWrapper._processing_elements[self._uuid]
-      to_process_local_ids = {self._id_fn(e[1]) for e in to_process_local}
+      to_process_local_ids = {self._element_id(e) for e in to_process_local}
       to_remove_ids = []
       for element_id, (element, future) in processing_elements.items():
         if element[0] == key and element_id not in to_process_local_ids:
@@ -485,7 +494,7 @@ class AsyncWrapper(beam.DoFn):
       finished_items = []
       for x in to_process_local:
         items_in_se_state += 1
-        x_id = self._id_fn(x[1])
+        x_id = self._element_id(x)
         if x_id in processing_elements:
           _, future = processing_elements[x_id]
           if future.done():

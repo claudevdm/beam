@@ -220,6 +220,39 @@ class AsyncTest(unittest.TestCase):
     self.assertEqual(fake_bag_state_key1.items, [])
     self.assertEqual(fake_bag_state_key2.items, [])
 
+  def test_cross_key_id_collision(self):
+    # Two distinct elements on different keys whose values share an id must
+    # not alias each other: in-flight work is tracked per (key, id), matching
+    # the per-key to_process state. Regression test for a bug where the
+    # tracking map was keyed by id alone, so key2's element was never
+    # scheduled, key2's commit emitted key1's output, and key1's element was
+    # rescheduled and processed twice.
+    dofn = BasicDofn()
+    async_dofn = async_lib.AsyncWrapper(dofn, use_asyncio=self.use_asyncio)
+    async_dofn.setup()
+    fake_bag_state_key1 = FakeBagState([])
+    fake_bag_state_key2 = FakeBagState([])
+    fake_timer = FakeTimer(0)
+    msg1 = ('key1', 'payload')
+    msg2 = ('key2', 'payload')
+    async_dofn.process(msg1, to_process=fake_bag_state_key1, timer=fake_timer)
+    async_dofn.process(msg2, to_process=fake_bag_state_key2, timer=fake_timer)
+    self.wait_for_empty(async_dofn)
+
+    # Fire key2 first: with id-only tracking this commit found key1's future
+    # under the shared id and emitted key1's element.
+    result = async_dofn.commit_finished_items(fake_bag_state_key2, fake_timer)
+    self.check_output(result, [msg2])
+    self.assertEqual(fake_bag_state_key2.items, [])
+
+    result = async_dofn.commit_finished_items(fake_bag_state_key1, fake_timer)
+    self.check_output(result, [msg1])
+    self.assertEqual(fake_bag_state_key1.items, [])
+
+    # Each element was processed exactly once (a rescheduled duplicate of
+    # msg1 would raise this count even if the outputs above looked right).
+    self.assertEqual(dofn.getProcessed(), 2)
+
   def test_long_item(self):
     # Test that everything still works with a long running time for the dofn.
     dofn = BasicDofn(sleep_time=5)
@@ -554,7 +587,7 @@ class AsyncTest(unittest.TestCase):
     # Verify the failed future was popped from local processing_elements
     with async_lib.AsyncWrapper._lock:
       self.assertNotIn(
-          async_dofn._id_fn(msg[1]),
+          async_dofn._element_id(msg),
           async_lib.AsyncWrapper._processing_elements[async_dofn._uuid],
       )
 
