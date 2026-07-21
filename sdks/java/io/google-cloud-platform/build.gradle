@@ -201,6 +201,7 @@ task integrationTest(type: Test, dependsOn: processTestResources) {
 
   include '**/*IT.class'
   exclude '**/BigQueryIOReadIT.class'
+  exclude '**/BigQueryLakehouseCatalogReadIT.class'
   exclude '**/BigQueryIOStorageQueryIT.class'
   exclude '**/BigQueryIOStorageReadIT.class'
   exclude '**/BigQueryIOStorageWriteIT.class'
@@ -286,6 +287,34 @@ task bigQueryEarlyRolloutIntegrationTest(type: Test, dependsOn: processTestResou
   include '**/BigQuerySchemaUpdateOptionsIT.class'
   include '**/BigQueryTimePartitioningClusteringIT.class'
   include '**/FileLoadsStreamingIT.class'
+
+  maxParallelForks 4
+  classpath = sourceSets.test.runtimeClasspath
+  testClassesDirs = sourceSets.test.output.classesDirs
+}
+
+/**
+ * Integration tests for BigQueryIO reads of Lakehouse runtime catalog (BigLake metastore) Iceberg
+ * tables via 4-part identifiers. The catalog and namespace must be provisioned beforehand (with
+ * credential vending enabled); see the class javadoc of BigQueryLakehouseCatalogReadIT.
+ */
+task bigQueryLakehouseCatalogIntegrationTest(type: Test, dependsOn: processTestResources) {
+  group = "Verification"
+  def gcpProject = project.findProperty('gcpProject') ?: 'dataflow-twest'
+  def lakehouseCatalog = project.findProperty('lakehouseCatalog') ?: 'dataflow-twest-lakehouse-e2e'
+  def lakehouseNamespace = project.findProperty('lakehouseNamespace') ?: 'beam_ns'
+  def lakehouseLocation = project.findProperty('lakehouseLocation') ?: 'us-central1'
+  systemProperty "beamTestPipelineOptions", JsonOutput.toJson([
+          "--runner=DirectRunner",
+          "--project=${gcpProject}",
+          "--lakehouseCatalog=${lakehouseCatalog}",
+          "--lakehouseNamespace=${lakehouseNamespace}",
+          "--lakehouseLocation=${lakehouseLocation}",
+  ])
+
+  outputs.upToDateWhen { false }
+
+  include '**/BigQueryLakehouseCatalogReadIT.class'
 
   maxParallelForks 4
   classpath = sourceSets.test.runtimeClasspath

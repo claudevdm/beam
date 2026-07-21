@@ -40,6 +40,7 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -458,6 +459,13 @@ public class BigQueryHelpers {
    * Parse a table specification in the form {@code "[project_id]:[dataset_id].[table_id]"} or
    * {@code "[project_id].[dataset_id].[table_id]"} or {@code "[dataset_id].[table_id]"}.
    *
+   * <p>Lakehouse runtime catalog (BigLake metastore) tables are referenced with four parts, {@code
+   * "[project_id].[catalog_id].[namespace_id].[table_id]"} (or {@code
+   * "[project_id]:[catalog_id].[namespace_id].[table_id]"}); these parse to a composite {@code
+   * "[catalog_id].[namespace_id]"} dataset id, which is the form the BigQuery APIs accept for such
+   * tables. More generally, when a specification contains more than three segments, everything
+   * between the project id and the final (table) segment becomes the dataset id.
+   *
    * <p>If the project id is omitted, the default project id is used.
    */
   @SuppressWarnings({
@@ -475,10 +483,40 @@ public class BigQueryHelpers {
               tableSpec));
     }
 
-    TableReference ref = new TableReference();
-    ref.setProjectId(match.group("PROJECT"));
+    // The regex above validates the character set; segment assignment is done explicitly so that
+    // composite "catalog.namespace" dataset ids parse correctly (the regex's greedy project group
+    // would otherwise swallow the catalog segment, since project ids may contain '.' and ':' for
+    // legacy domain-scoped projects).
+    String project = null;
+    String rest = tableSpec;
+    int lastColon = tableSpec.lastIndexOf(':');
+    if (lastColon >= 0) {
+      project = tableSpec.substring(0, lastColon);
+      rest = tableSpec.substring(lastColon + 1);
+    }
+    String[] segments = rest.split("\\.", -1);
+    int datasetStart = 0;
+    if (project == null) {
+      // Purely dotted form: the first segment is the project id when there are at least three
+      // segments and it is a plausible project id. (Dataset ids may contain characters such as
+      // '_' that project ids may not, in which case the whole prefix is the dataset id.)
+      if (segments.length >= 3 && BigQueryIO.PROJECT_ID_PATTERN.matcher(segments[0]).matches()) {
+        project = segments[0];
+        datasetStart = 1;
+      }
+    } else if (project.indexOf('.') >= 0 && segments.length > 2) {
+      // Legacy domain-scoped project ("example.com:project") written with a '.' separator after
+      // the project: keep the historical binding, in which the project id extends through all but
+      // the last two segments.
+      datasetStart = segments.length - 2;
+      project = project + ":" + String.join(".", Arrays.copyOfRange(segments, 0, datasetStart));
+    }
 
-    return ref.setDatasetId(match.group("DATASET")).setTableId(match.group("TABLE"));
+    TableReference ref = new TableReference();
+    ref.setProjectId(project);
+    return ref.setDatasetId(
+            String.join(".", Arrays.copyOfRange(segments, datasetStart, segments.length - 1)))
+        .setTableId(segments[segments.length - 1]);
   }
 
   @SuppressWarnings({

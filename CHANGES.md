@@ -65,6 +65,7 @@
 ## I/Os
 
 * Support for X source added (Java/Python) ([#X](https://github.com/apache/beam/issues/X)).
+* (Java) BigQueryIO now supports reading BigQuery Lakehouse runtime catalog (BigLake metastore) Iceberg tables with the Storage Read API, using 4-part `project.catalog.namespace.table` identifiers (or a `TableReference` with a composite `catalog.namespace` dataset id). Previously such references were silently mis-parsed, and tables without storage statistics failed with a `NullPointerException`.
 
 ## New Features / Improvements
 

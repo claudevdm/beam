@@ -28,6 +28,7 @@ import com.google.api.services.bigquery.model.JobStatus;
 import com.google.api.services.bigquery.model.TableReference;
 import com.google.api.services.bigquery.model.TableRow;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
@@ -99,6 +100,127 @@ public class BigQueryHelpersTest {
     assertEquals(null, ref.getProjectId());
     assertEquals("data_set", ref.getDatasetId());
     assertEquals("table_name", ref.getTableId());
+  }
+
+  @Test
+  public void testTableParsing_lakehouseCatalogDotted() {
+    // 4-part Lakehouse runtime catalog reference: project.catalog.namespace.table. The
+    // catalog+namespace form a composite dataset id, including when the catalog name uses the
+    // GCS-bucket charset (lowercase, digits, dashes).
+    TableReference ref = BigQueryHelpers.parseTableSpec("my-project.my-bucket-catalog.my_ns.tbl");
+    assertEquals("my-project", ref.getProjectId());
+    assertEquals("my-bucket-catalog.my_ns", ref.getDatasetId());
+    assertEquals("tbl", ref.getTableId());
+  }
+
+  @Test
+  public void testTableParsing_lakehouseCatalogColon() {
+    TableReference ref = BigQueryHelpers.parseTableSpec("my-project:my-catalog.my_ns.tbl");
+    assertEquals("my-project", ref.getProjectId());
+    assertEquals("my-catalog.my_ns", ref.getDatasetId());
+    assertEquals("tbl", ref.getTableId());
+  }
+
+  @Test
+  public void testTableParsing_lakehouseCatalogNoProject() {
+    // Dataset ids may contain characters that project ids may not (e.g. '_'), in which case the
+    // whole prefix is the (composite) dataset id.
+    TableReference ref = BigQueryHelpers.parseTableSpec("my_catalog.my_ns.tbl");
+    assertEquals(null, ref.getProjectId());
+    assertEquals("my_catalog.my_ns", ref.getDatasetId());
+    assertEquals("tbl", ref.getTableId());
+  }
+
+  @Test
+  public void testTableParsing_multiLevelNamespace() {
+    // More than four segments: everything between the project and the table becomes the dataset.
+    TableReference ref = BigQueryHelpers.parseTableSpec("my-project.cat.ns1.ns2.tbl");
+    assertEquals("my-project", ref.getProjectId());
+    assertEquals("cat.ns1.ns2", ref.getDatasetId());
+    assertEquals("tbl", ref.getTableId());
+  }
+
+  @Test
+  public void testTableParsing_lakehouseWithPartitionDecorator() {
+    TableReference ref = BigQueryHelpers.parseTableSpec("my-project.my-catalog.ns.tbl$20260101");
+    assertEquals("my-project", ref.getProjectId());
+    assertEquals("my-catalog.ns", ref.getDatasetId());
+    assertEquals("tbl$20260101", ref.getTableId());
+  }
+
+  @Test
+  public void testTableParsing_domainScopedProjectPreserved() {
+    // Legacy domain-scoped projects keep their historical binding.
+    TableReference ref = BigQueryHelpers.parseTableSpec("example.com:project:data_set.tbl");
+    assertEquals("example.com:project", ref.getProjectId());
+    assertEquals("data_set", ref.getDatasetId());
+    assertEquals("tbl", ref.getTableId());
+
+    ref = BigQueryHelpers.parseTableSpec("example.com:project.data_set.tbl");
+    assertEquals("example.com:project", ref.getProjectId());
+    assertEquals("data_set", ref.getDatasetId());
+    assertEquals("tbl", ref.getTableId());
+  }
+
+  @Test
+  public void testTableParsing_projectlessCatalogSpecIsAmbiguous() {
+    // A project-less catalog reference is indistinguishable from project.dataset.table when the
+    // catalog name fits the project-id charset: the project interpretation wins. Users must
+    // write the full 4-part name (or use a TableReference) for such catalogs; only catalog
+    // names that are illegal as project ids (e.g. containing '_') parse as a composite dataset
+    // with the project left to be defaulted.
+    TableReference ref = BigQueryHelpers.parseTableSpec("my-bucket-catalog.my_ns.tbl");
+    assertEquals("my-bucket-catalog", ref.getProjectId());
+    assertEquals("my_ns", ref.getDatasetId());
+    assertEquals("tbl", ref.getTableId());
+  }
+
+  @Test
+  public void testTableParsing_informationSchema() {
+    // INFORMATION_SCHEMA views ride along with the multi-segment rule: the pseudo-schema folds
+    // into the dataset id. (Neither the Storage Read API nor extract jobs support reading
+    // INFORMATION_SCHEMA views, so this reference form never reaches a table API; pinning the
+    // binding here documents that it at least keeps a valid, undotted project id.)
+    TableReference ref =
+        BigQueryHelpers.parseTableSpec("my-project.data_set.INFORMATION_SCHEMA.TABLES");
+    assertEquals("my-project", ref.getProjectId());
+    assertEquals("data_set.INFORMATION_SCHEMA", ref.getDatasetId());
+    assertEquals("TABLES", ref.getTableId());
+  }
+
+  @Test
+  public void testTableParsing_shortFirstSegmentIsNotAProject() {
+    // A single character cannot be a project id, so the prefix folds into the dataset id
+    // (historical behavior).
+    TableReference ref = BigQueryHelpers.parseTableSpec("a.b.c");
+    assertEquals(null, ref.getProjectId());
+    assertEquals("a.b", ref.getDatasetId());
+    assertEquals("c", ref.getTableId());
+  }
+
+  @Test
+  public void testToTableSpecParseTableSpecRoundTrip() {
+    List<TableReference> refs =
+        Arrays.asList(
+            new TableReference()
+                .setProjectId("my-project")
+                .setDatasetId("data_set")
+                .setTableId("tbl"),
+            new TableReference()
+                .setProjectId("my-project")
+                .setDatasetId("my-catalog.my_ns")
+                .setTableId("tbl"),
+            new TableReference()
+                .setProjectId("example.com:project")
+                .setDatasetId("data_set")
+                .setTableId("tbl"),
+            new TableReference().setDatasetId("data_set").setTableId("tbl"));
+    for (TableReference ref : refs) {
+      TableReference reparsed = BigQueryHelpers.parseTableSpec(BigQueryHelpers.toTableSpec(ref));
+      assertEquals(BigQueryHelpers.toTableSpec(ref), ref.getProjectId(), reparsed.getProjectId());
+      assertEquals(BigQueryHelpers.toTableSpec(ref), ref.getDatasetId(), reparsed.getDatasetId());
+      assertEquals(BigQueryHelpers.toTableSpec(ref), ref.getTableId(), reparsed.getTableId());
+    }
   }
 
   @Test
