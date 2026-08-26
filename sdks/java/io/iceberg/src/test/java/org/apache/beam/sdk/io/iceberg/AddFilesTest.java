@@ -27,6 +27,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasEntry;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -1019,6 +1020,58 @@ public class AddFilesTest {
       }
     }
     assertTrue("stats for the added column", sawEmailStats);
+  }
+
+  @Test
+  public void testAliasedFileRegistersWithStatsAndReadableMapping() throws Exception {
+    catalog.createTable(tableId, icebergSchema);
+    Schema aliased =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.required(2, "nm", Types.StringType.get()),
+            Types.NestedField.required(3, "age", Types.IntegerType.get()));
+    Record record = GenericRecord.create(aliased);
+    record.setField("id", 1);
+    record.setField("nm", "a");
+    record.setField("age", 1);
+    String file = writeWithSchema("aliased.parquet", aliased, record);
+
+    SchemaEvolutionConfig config =
+        SchemaEvolutionConfig.builder()
+            .setOptions(Arrays.asList(SchemaEvolutionOption.ALLOW_FIELD_ADDITION))
+            .withColumnAliases(java.util.Collections.singletonMap("nm", "name"))
+            .build();
+    PCollectionRowTuple output =
+        pipeline.apply("Create Input", Create.of(file)).apply(addFiles(config));
+    PAssert.that(output.get("errors")).empty();
+    pipeline.run().waitUntilFinish();
+
+    Table table = catalog.loadTable(tableId);
+    assertNull("alias never becomes a column", table.schema().findField("nm"));
+    int nameId = table.schema().findField("name").fieldId();
+    org.apache.iceberg.DataFile registered =
+        Iterables.getOnlyElement(table.newScan().includeColumnStats().planFiles()).file();
+    assertEquals(Long.valueOf(0), registered.nullValueCounts().get(nameId));
+    NameMapping mapping = currentMapping();
+    assertEquals(nameId, mapping.find("nm").id().intValue());
+  }
+
+  @Test
+  public void testIgnoredColumnIsNeverAddedOrCollected() throws Exception {
+    catalog.createTable(tableId, icebergSchema);
+    String wide = writeWithSchema("wide.parquet", WIDER, widerRecord(WIDER));
+    SchemaEvolutionConfig config =
+        SchemaEvolutionConfig.builder()
+            .setOptions(Arrays.asList(SchemaEvolutionOption.ALLOW_FIELD_ADDITION))
+            .setIgnoredColumns(Arrays.asList("email"))
+            .build();
+    PCollectionRowTuple output =
+        pipeline.apply("Create Input", Create.of(wide)).apply(addFiles(config));
+    PAssert.that(output.get("errors")).empty();
+    pipeline.run().waitUntilFinish();
+    Table table = catalog.loadTable(tableId);
+    assertNull(table.schema().findField("email"));
+    assertEquals(1, Iterables.size(table.newScan().planFiles()));
   }
 
   @Test

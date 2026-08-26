@@ -138,6 +138,7 @@ import org.slf4j.LoggerFactory;
  *     SchemaEvolutionConfig.builder()
  *         .setOptions(List.of(ALLOW_FIELD_ADDITION, ALLOW_TYPE_PROMOTION))
  *         .setRequiredColumns(List.of("id"))
+ *         .withColumnAliases(Map.of("amt", "amount"))
  *         .build();
  * paths.apply(new AddFiles(catalog, "db.sales", null, null, null, null, null, null, evolution));
  * }</pre>
@@ -300,7 +301,9 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
             .apply("GatherManifests", batchManifestFiles)
             .apply(
                 "CommitManifests",
-                ParDo.of(new CommitManifestFilesDoFn(catalogConfig, tableIdentifier)))
+                ParDo.of(
+                    new CommitManifestFilesDoFn(
+                        catalogConfig, tableIdentifier, evolution.getColumnAliases())))
             .setRowSchema(SnapshotInfo.getSchema());
 
     return PCollectionRowTuple.of(
@@ -330,7 +333,7 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
         new CommitSchemaUnion.TableCreation(partitionFields, sortFields, tableProps);
     PCollection<Long> signal =
         windowed
-            .apply("ReadFooterSchema", ParDo.of(new ReadFooterSchema()))
+            .apply("ReadFooterSchema", ParDo.of(new ReadFooterSchema(evolution)))
             .setCoder(CollectDistinctSchemas.groupCoder())
             .apply(
                 "CollectDistinctSchemas",
@@ -595,7 +598,7 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
           }
           if (evolution.isEnabled()) {
             try {
-              fileSchema = FileSchemas.effective(parquetFooter);
+              fileSchema = FileSchemas.effective(parquetFooter, evolution);
             } catch (Exception e) {
               return errorResult(
                   filePath, UNREADABLE_SCHEMA_ERROR + errorMessage(e), timestamp, window, paneInfo);
@@ -616,7 +619,7 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
                   inputFile,
                   format,
                   MetricsConfig.forTable(table),
-                  MappingUtil.create(table.schema()),
+                  NameMappingUtils.forStats(table, evolution.getColumnAliases()),
                   parquetFooter);
         } catch (Exception e) {
           return errorResult(filePath, errorMessage(e), timestamp, window, paneInfo);
@@ -640,7 +643,9 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
         } else {
           try {
             // option 2: examine DataFile min/max statistics to determine partition
-            partitionPath = getPartitionFromMetrics(metrics, inputFile, table, parquetFooter);
+            partitionPath =
+                getPartitionFromMetrics(
+                    metrics, inputFile, table, parquetFooter, evolution.getColumnAliases());
           } catch (UnknownPartitionException e) {
             return errorResult(
                 filePath, UNKNOWN_PARTITION_ERROR + e.getMessage(), timestamp, window, paneInfo);
@@ -801,6 +806,17 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
     static String getPartitionFromMetrics(
         Metrics metrics, InputFile inputFile, Table table, @Nullable ParquetMetadata preReadFooter)
         throws UnknownPartitionException {
+      return getPartitionFromMetrics(
+          metrics, inputFile, table, preReadFooter, java.util.Collections.emptyMap());
+    }
+
+    static String getPartitionFromMetrics(
+        Metrics metrics,
+        InputFile inputFile,
+        Table table,
+        @Nullable ParquetMetadata preReadFooter,
+        Map<String, String> aliases)
+        throws UnknownPartitionException {
       List<PartitionField> fields = table.spec().fields();
       List<Integer> sourceIds =
           fields.stream().map(PartitionField::sourceId).collect(Collectors.toList());
@@ -827,7 +843,7 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
                 inputFile,
                 inferFormat(inputFile.location()),
                 configWithPartitionFields,
-                MappingUtil.create(table.schema()),
+                NameMappingUtils.forStats(table, aliases),
                 preReadFooter);
       }
 
@@ -954,30 +970,46 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
     private final StateSpec<ValueState<Long>> lastCommitTimestamp =
         StateSpecs.value(VarLongCoder.of());
 
+    private final Map<String, String> aliases;
+
     public CommitManifestFilesDoFn(IcebergCatalogConfig catalogConfig, String identifier) {
-      this.catalogConfig = catalogConfig;
-      this.identifier = identifier;
+      this(catalogConfig, identifier, java.util.Collections.emptyMap());
     }
 
-    private static void ensureNameMappingPresent(Table table) {
+    CommitManifestFilesDoFn(
+        IcebergCatalogConfig catalogConfig, String identifier, Map<String, String> aliases) {
+      this.catalogConfig = catalogConfig;
+      this.identifier = identifier;
+      this.aliases = aliases;
+    }
+
+    private static void ensureNameMappingPresent(Table table, Map<String, String> aliases) {
       // Forces name-based resolution: zero-copy files typically don't carry
       // field ids, so any schema column missing from the mapping is unreadable
-      // in registered files.
+      // in registered files. Configured aliases must be present too, or aliased
+      // files are unreadable until the next schema change.
       @Nullable
       NameMapping existing =
           NameMappingUtils.parseOrNull(
               table.properties().get(TableProperties.DEFAULT_NAME_MAPPING));
-      if (existing != null && NameMappingUtils.covers(existing, table.schema().asStruct())) {
+      boolean covers =
+          existing != null && NameMappingUtils.covers(existing, table.schema().asStruct());
+      if (existing != null
+          && covers
+          && NameMappingUtils.hasAliases(existing, table.schema(), aliases)) {
         return;
       }
-      if (existing != null) {
+      if (existing != null && !covers) {
         LOG.info(
             "Name mapping of table {} does not cover its schema; regenerating it, preserving "
                 + "custom names where possible.",
             table.name());
       }
-      String mappingJson = NameMappingUtils.regenerate(table.schema(), existing);
-      table.updateProperties().set(TableProperties.DEFAULT_NAME_MAPPING, mappingJson).commit();
+      NameMapping mapping = NameMappingUtils.forStats(table, aliases);
+      table
+          .updateProperties()
+          .set(TableProperties.DEFAULT_NAME_MAPPING, NameMappingParser.toJson(mapping))
+          .commit();
     }
 
     @ProcessElement
@@ -995,7 +1027,7 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
         table = catalogConfig.catalog().loadTable(IcebergUtils.parseTableIdentifier(identifier));
       }
       table.refresh();
-      ensureNameMappingPresent(table);
+      ensureNameMappingPresent(table, aliases);
 
       if (shouldSkip(commitId, lastCommitTimestamp.read())) {
         return;

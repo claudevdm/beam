@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.util.Map;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.mapping.MappingUtil;
 import org.apache.iceberg.mapping.NameMapping;
@@ -421,5 +422,121 @@ public class NameMappingUtilsTest {
 
     assertEquals(1, merged.find("new_name").id().intValue());
     assertEquals(1, merged.find("old_name").id().intValue());
+  }
+
+  // ---- aliases
+
+  private static final Schema ALIAS_SCHEMA =
+      new Schema(
+          Types.NestedField.required(1, "id", Types.IntegerType.get()),
+          Types.NestedField.optional(2, "amount", Types.LongType.get()),
+          Types.NestedField.optional(
+              3,
+              "address",
+              Types.StructType.of(
+                  Types.NestedField.optional(4, "city", Types.StringType.get()),
+                  Types.NestedField.optional(5, "zip", Types.IntegerType.get()))));
+
+  private static Map<String, String> aliases(String... pairs) {
+    Map<String, String> map = new java.util.LinkedHashMap<>();
+    for (int i = 0; i < pairs.length; i += 2) {
+      map.put(pairs[i], pairs[i + 1]);
+    }
+    return map;
+  }
+
+  private static NameMapping generated() {
+    return NameMappingParser.fromJson(NameMappingUtils.regenerate(ALIAS_SCHEMA, null));
+  }
+
+  @Test
+  public void testWithAliasesAddsTopLevelAndNestedNames() {
+    NameMapping result =
+        NameMappingUtils.withAliases(
+            generated(), ALIAS_SCHEMA, aliases("amt", "amount", "address.zip_code", "address.zip"));
+    NameMapping expected =
+        mapping(
+            "[ {'field-id': 1, 'names': ['id']},"
+                + "  {'field-id': 2, 'names': ['amount', 'amt']},"
+                + "  {'field-id': 3, 'names': ['address'], 'fields': ["
+                + "     {'field-id': 4, 'names': ['city']},"
+                + "     {'field-id': 5, 'names': ['zip', 'zip_code']} ]} ]");
+    assertEquals(expected.asMappedFields(), result.asMappedFields());
+    assertTrue(
+        NameMappingUtils.hasAliases(
+            result, ALIAS_SCHEMA, aliases("amt", "amount", "address.zip_code", "address.zip")));
+    assertFalse(NameMappingUtils.hasAliases(generated(), ALIAS_SCHEMA, aliases("amt", "amount")));
+  }
+
+  @Test
+  public void testTwoAliasesForOneColumn() {
+    NameMapping result =
+        NameMappingUtils.withAliases(
+            generated(), ALIAS_SCHEMA, aliases("amt", "amount", "amnt", "amount"));
+    assertEquals(2, result.find("amount").id().intValue());
+    assertEquals(2, result.find("amt").id().intValue());
+    assertEquals(2, result.find("amnt").id().intValue());
+  }
+
+  @Test
+  public void testWithAliasesIsIdempotent() {
+    Map<String, String> aliases = aliases("amt", "amount");
+    NameMapping once = NameMappingUtils.withAliases(generated(), ALIAS_SCHEMA, aliases);
+    NameMapping twice = NameMappingUtils.withAliases(once, ALIAS_SCHEMA, aliases);
+    assertEquals(once.asMappedFields(), twice.asMappedFields());
+  }
+
+  @Test
+  public void testAliasForAColumnNotInTheSchemaIsDeferred() {
+    Map<String, String> aliases = aliases("eml", "email");
+    NameMapping result = NameMappingUtils.withAliases(generated(), ALIAS_SCHEMA, aliases);
+    assertEquals(generated().asMappedFields(), result.asMappedFields());
+    assertTrue(
+        "nothing applicable yet", NameMappingUtils.hasAliases(result, ALIAS_SCHEMA, aliases));
+  }
+
+  @Test
+  public void testAliasShadowingARealColumnIsSkipped() {
+    Map<String, String> aliases = aliases("id", "amount");
+    NameMapping result = NameMappingUtils.withAliases(generated(), ALIAS_SCHEMA, aliases);
+    assertEquals(generated().asMappedFields(), result.asMappedFields());
+    assertEquals(1, result.find("id").id().intValue());
+    assertTrue(NameMappingUtils.hasAliases(result, ALIAS_SCHEMA, aliases));
+  }
+
+  @Test
+  public void testAliasAlreadyMappedToAnotherFieldIsSkipped() {
+    NameMapping custom =
+        mapping(
+            "[ {'field-id': 1, 'names': ['id', 'amt']},"
+                + "  {'field-id': 2, 'names': ['amount']},"
+                + "  {'field-id': 3, 'names': ['address'], 'fields': ["
+                + "     {'field-id': 4, 'names': ['city']},"
+                + "     {'field-id': 5, 'names': ['zip']} ]} ]");
+    Map<String, String> aliases = aliases("amt", "amount");
+    NameMapping result = NameMappingUtils.withAliases(custom, ALIAS_SCHEMA, aliases);
+    assertEquals(custom.asMappedFields(), result.asMappedFields());
+    assertTrue(NameMappingUtils.hasAliases(result, ALIAS_SCHEMA, aliases));
+  }
+
+  @Test
+  public void testAliasSurvivesRegeneration() {
+    NameMapping aliased =
+        NameMappingUtils.withAliases(generated(), ALIAS_SCHEMA, aliases("amt", "amount"));
+    Schema wider =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.optional(2, "amount", Types.LongType.get()),
+            Types.NestedField.optional(
+                3,
+                "address",
+                Types.StructType.of(
+                    Types.NestedField.optional(4, "city", Types.StringType.get()),
+                    Types.NestedField.optional(5, "zip", Types.IntegerType.get()))),
+            Types.NestedField.optional(6, "email", Types.StringType.get()));
+    NameMapping regenerated =
+        NameMappingParser.fromJson(NameMappingUtils.regenerate(wider, aliased));
+    assertEquals(2, regenerated.find("amt").id().intValue());
+    assertEquals(6, regenerated.find("email").id().intValue());
   }
 }

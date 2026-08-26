@@ -106,6 +106,138 @@ public class SchemaEvolutionConfigTest {
         forced.incompatibleSchemaHandling(true));
   }
 
+  // ---- aliases, pins and ignores: every interaction
+
+  private static SchemaEvolutionConfig.Builder enabled() {
+    return SchemaEvolutionConfig.builder()
+        .setOptions(Arrays.asList(SchemaEvolutionOption.ALLOW_FIELD_ADDITION));
+  }
+
+  private static java.util.Map<String, String> alias(String... pairs) {
+    java.util.Map<String, String> map = new java.util.LinkedHashMap<>();
+    for (int i = 0; i < pairs.length; i += 2) {
+      map.put(pairs[i], pairs[i + 1]);
+    }
+    return map;
+  }
+
+  private static void assertRejected(String expectedMessagePart, Runnable build) {
+    IllegalArgumentException e = assertThrows(IllegalArgumentException.class, build::run);
+    assertTrue(e.getMessage(), e.getMessage().contains(expectedMessagePart));
+  }
+
+  @Test
+  public void testAliasesAccepted() {
+    SchemaEvolutionConfig config =
+        enabled()
+            .withColumnAliases(alias("amt", "amount", "address.zip_code", "address.zip"))
+            .build();
+    assertEquals("amount", config.getColumnAliases().get("amt"));
+    assertEquals("address.zip", config.getColumnAliases().get("address.zip_code"));
+  }
+
+  @Test
+  public void testTwoAliasesForOneCanonicalAccepted() {
+    SchemaEvolutionConfig config =
+        enabled().withColumnAliases(alias("amt", "amount", "amnt", "amount")).build();
+    assertEquals(2, config.getColumnAliases().size());
+  }
+
+  @Test
+  public void testAliasToItselfRejected() {
+    assertRejected("maps to itself", () -> enabled().withColumnAliases(alias("a", "a")).build());
+  }
+
+  @Test
+  public void testAliasChainRejected() {
+    assertRejected("chains", () -> enabled().withColumnAliases(alias("a", "b", "b", "c")).build());
+  }
+
+  @Test
+  public void testAliasAcrossParentsRejected() {
+    assertRejected(
+        "same parent",
+        () -> enabled().withColumnAliases(alias("address.zip", "other.zip")).build());
+    assertRejected(
+        "same parent", () -> enabled().withColumnAliases(alias("zip", "address.zip")).build());
+  }
+
+  @Test
+  public void testEmptyAliasRejected() {
+    assertRejected("Empty", () -> enabled().withColumnAliases(alias("", "amount")).build());
+    assertRejected("Empty", () -> enabled().withColumnAliases(alias("amt", "")).build());
+  }
+
+  @Test
+  public void testPinnedAliasRejectedPinnedCanonicalAccepted() {
+    assertRejected(
+        "pin the canonical name",
+        () ->
+            enabled()
+                .withColumnAliases(alias("amt", "amount"))
+                .setRequiredColumns(Arrays.asList("amt"))
+                .build());
+    SchemaEvolutionConfig config =
+        enabled()
+            .withColumnAliases(alias("amt", "amount"))
+            .setRequiredColumns(Arrays.asList("amount"))
+            .build();
+    assertTrue(config.isPinned("amount"));
+  }
+
+  @Test
+  public void testIgnoredAliasOrCanonicalRejected() {
+    assertRejected(
+        "ignored",
+        () ->
+            enabled()
+                .withColumnAliases(alias("amt", "amount"))
+                .setIgnoredColumns(Arrays.asList("amt"))
+                .build());
+    assertRejected(
+        "ignored",
+        () ->
+            enabled()
+                .withColumnAliases(alias("amt", "amount"))
+                .setIgnoredColumns(Arrays.asList("amount"))
+                .build());
+  }
+
+  @Test
+  public void testPinnedAndIgnoredRejected() {
+    assertRejected(
+        "both pinned and ignored",
+        () ->
+            enabled()
+                .setRequiredColumns(Arrays.asList("id"))
+                .setIgnoredColumns(Arrays.asList("id"))
+                .build());
+  }
+
+  @Test
+  public void testUnrelatedAliasPinAndIgnoreCoexist() {
+    SchemaEvolutionConfig config =
+        enabled()
+            .withColumnAliases(alias("amt", "amount"))
+            .setRequiredColumns(Arrays.asList("id"))
+            .setIgnoredColumns(Arrays.asList("debug"))
+            .build();
+    assertTrue(config.isPinned("id"));
+    assertTrue(config.getIgnoredColumns().contains("debug"));
+    assertEquals("amount", config.getColumnAliases().get("amt"));
+  }
+
+  @Test
+  public void testAliasesAndIgnoresAreImmutableCopies() {
+    java.util.Map<String, String> aliases = alias("amt", "amount");
+    SchemaEvolutionConfig config = enabled().withColumnAliases(aliases).build();
+    aliases.put("x", "y");
+    assertEquals(1, config.getColumnAliases().size());
+    assertThrows(
+        UnsupportedOperationException.class, () -> config.getColumnAliases().put("p", "q"));
+    assertThrows(UnsupportedOperationException.class, () -> config.getIgnoredColumns().add("z"));
+  }
+
   @Test
   public void testSerializableRoundTrip() {
     SchemaEvolutionConfig config =

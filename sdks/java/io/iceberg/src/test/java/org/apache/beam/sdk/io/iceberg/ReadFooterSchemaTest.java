@@ -181,6 +181,29 @@ public class ReadFooterSchemaTest {
   }
 
   @Test
+  public void testAliasedColumnIsEmittedUnderTheCanonicalName() throws IOException {
+    Schema withAlias =
+        new Schema(
+            required(1, "id", Types.IntegerType.get()), optional(2, "nm", Types.StringType.get()));
+    Record full = GenericRecord.create(withAlias).copy("id", 1, "nm", "a");
+    String file = writeParquet("alias.parquet", withAlias, full);
+    SchemaEvolutionConfig config =
+        SchemaEvolutionConfig.builder()
+            .setOptions(Arrays.asList(SchemaEvolutionOption.ALLOW_FIELD_ADDITION))
+            .withColumnAliases(java.util.Collections.singletonMap("nm", "name"))
+            .build();
+    // the schema is emitted with the canonical name; so is the null-free column
+    Schema expected =
+        new Schema(
+            required(1, "id", Types.IntegerType.get()),
+            optional(2, "name", Types.StringType.get()));
+    PCollection<CollectDistinctSchemas.SchemaGroup> out = run(config, file);
+    assertSchemas(out, expected);
+    assertNullFreeColumns(out, Arrays.asList("name"));
+    pipeline.run();
+  }
+
+  @Test
   public void testPermutedColumnsProduceIdenticalSchema() throws IOException {
     Schema permuted =
         new Schema(
@@ -230,9 +253,14 @@ public class ReadFooterSchemaTest {
   }
 
   private PCollection<CollectDistinctSchemas.SchemaGroup> run(String... paths) {
+    return run(SchemaEvolutionConfig.disabled(), paths);
+  }
+
+  private PCollection<CollectDistinctSchemas.SchemaGroup> run(
+      SchemaEvolutionConfig config, String... paths) {
     return pipeline
         .apply(Create.of(Arrays.asList(paths)))
-        .apply(ParDo.of(new ReadFooterSchema()))
+        .apply(ParDo.of(new ReadFooterSchema(config)))
         .setCoder(CollectDistinctSchemas.groupCoder());
   }
 
