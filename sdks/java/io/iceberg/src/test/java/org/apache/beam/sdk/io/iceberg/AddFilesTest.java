@@ -41,13 +41,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.testing.ExpectedLogs;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.testing.TestStream;
+import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
+import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionRowTuple;
+import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.Row;
+import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
@@ -116,6 +121,7 @@ public class AddFilesTest {
   private IcebergCatalogConfig catalogConfig;
   @ClassRule public static final TemporaryFolder TEMPORARY_FOLDER = new TemporaryFolder();
   @Rule public TestName testName = new TestName();
+  @Rule public ExpectedLogs logs = ExpectedLogs.none(AddFiles.class);
   @Rule public ExpectedException thrown = ExpectedException.none();
 
   @Rule
@@ -948,5 +954,299 @@ public class AddFilesTest {
 
   private Record record(int id, String name, int age) {
     return GenericRecord.create(icebergSchema).copy("id", id, "name", name, "age", age);
+  }
+
+  // ---- ConvertToDataFile coverage check and pinned columns
+
+  private static final SchemaEvolutionConfig ADDITIONS =
+      SchemaEvolutionConfig.of(SchemaEvolutionOption.ALLOW_FIELD_ADDITION);
+
+  private PCollectionTuple convert(SchemaEvolutionConfig config, String... files) {
+    PCollectionTuple out =
+        pipeline
+            .apply("Create Input", Create.of(Arrays.asList(files)))
+            .apply(
+                ParDo.of(
+                        new AddFiles.ConvertToDataFile(
+                            catalogConfig, tableId.toString(), null, null, null, null, config))
+                    .withOutputTags(
+                        AddFiles.ConvertToDataFile.DATA_FILES,
+                        TupleTagList.of(AddFiles.ConvertToDataFile.ERRORS)));
+    out.get(AddFiles.ConvertToDataFile.ERRORS).setRowSchema(AddFiles.ERROR_SCHEMA);
+    return out;
+  }
+
+  private String writeWithSchema(String name, Schema schema, Record... records) throws IOException {
+    String file = root + name;
+    DataWriter<Record> writer =
+        Parquet.writeData(Files.localOutput(file))
+            .schema(schema)
+            .withSpec(PartitionSpec.unpartitioned())
+            .createWriterFunc(GenericParquetWriter::create)
+            .build();
+    try {
+      for (Record record : records) {
+        writer.write(record);
+      }
+    } finally {
+      writer.close();
+    }
+    return file;
+  }
+
+  private static Record widerRecord(Schema wider) {
+    Record record = GenericRecord.create(wider);
+    record.setField("id", 1);
+    record.setField("name", "a");
+    record.setField("age", 1);
+    record.setField("email", "e");
+    return record;
+  }
+
+  private void assertSingleError(PCollectionTuple out, String file, String contains) {
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.DATA_FILES)).empty();
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.ERRORS))
+        .satisfies(
+            rows -> {
+              Row row = Iterables.getOnlyElement(rows);
+              assertEquals(file, row.getString("file"));
+              assertThat(row.getString("error"), containsString(contains));
+              return null;
+            });
+  }
+
+  @Test
+  public void testEmptySchemaTableWarnsAndStillRegisters() throws Exception {
+    catalog.createTable(tableId, new Schema());
+    String file = root + "data.parquet";
+    DataWriter<Record> writer = createWriter(file);
+    writer.write(record(1, "a", 1));
+    writer.close();
+
+    PCollectionTuple out = convert(SchemaEvolutionConfig.disabled(), file);
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.ERRORS)).empty();
+    PAssert.thatSingleton(out.get(AddFiles.ConvertToDataFile.DATA_FILES).apply(Count.globally()))
+        .isEqualTo(1L);
+    pipeline.run().waitUntilFinish();
+    logs.verifyWarn("has no columns");
+  }
+
+  /** Files without embedded field ids against a zero-column table: the incident shape. */
+  @Test
+  public void testEmptySchemaTableWithIdLessParquetStillRegisters() throws Exception {
+    catalog.createTable(tableId, new Schema());
+    File file = new File(temp.getRoot(), "idless.parquet");
+    org.apache.avro.Schema avro =
+        org.apache.avro.SchemaBuilder.record("r")
+            .fields()
+            .requiredInt("id")
+            .optionalString("name")
+            .name("address")
+            .type()
+            .record("address")
+            .fields()
+            .optionalString("city")
+            .endRecord()
+            .noDefault()
+            .endRecord();
+    try (org.apache.parquet.hadoop.ParquetWriter<Object> writer =
+        org.apache.parquet.avro.AvroParquetWriter.builder(
+                new org.apache.hadoop.fs.Path(file.getAbsolutePath()))
+            .withSchema(avro)
+            .build()) {
+      org.apache.avro.generic.GenericData.Record record =
+          new org.apache.avro.generic.GenericData.Record(avro);
+      record.put("id", 1);
+      record.put("name", "a");
+      org.apache.avro.generic.GenericData.Record address =
+          new org.apache.avro.generic.GenericData.Record(avro.getField("address").schema());
+      address.put("city", "c");
+      record.put("address", address);
+      writer.write(record);
+    }
+    PCollectionTuple out = convert(SchemaEvolutionConfig.disabled(), file.getAbsolutePath());
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.ERRORS)).empty();
+    PAssert.thatSingleton(out.get(AddFiles.ConvertToDataFile.DATA_FILES).apply(Count.globally()))
+        .isEqualTo(1L);
+    pipeline.run().waitUntilFinish();
+  }
+
+  @Test
+  public void testCoveredFileRegistersWithEvolutionEnabled() throws Exception {
+    catalog.createTable(tableId, icebergSchema);
+    String file = root + "data.parquet";
+    DataWriter<Record> writer = createWriter(file);
+    writer.write(record(1, "a", 1));
+    writer.close();
+
+    PCollectionTuple out = convert(ADDITIONS, file);
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.ERRORS)).empty();
+    PAssert.thatSingleton(out.get(AddFiles.ConvertToDataFile.DATA_FILES).apply(Count.globally()))
+        .isEqualTo(1L);
+    pipeline.run().waitUntilFinish();
+  }
+
+  @Test
+  public void testUncoveredFileRoutesToErrorsWhenEvolutionEnabled() throws Exception {
+    catalog.createTable(tableId, icebergSchema);
+    Schema wider =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.required(2, "name", Types.StringType.get()),
+            Types.NestedField.required(3, "age", Types.IntegerType.get()),
+            Types.NestedField.optional(4, "email", Types.StringType.get()));
+    String file = writeWithSchema("wider.parquet", wider, widerRecord(wider));
+
+    PCollectionTuple out = convert(ADDITIONS, file);
+    assertSingleError(out, file, "does not cover the file");
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.ERRORS))
+        .satisfies(
+            rows -> {
+              assertThat(
+                  Iterables.getOnlyElement(rows).getString("error"),
+                  containsString("add optional email string"));
+              return null;
+            });
+    pipeline.run().waitUntilFinish();
+  }
+
+  @Test
+  public void testExtraColumnsRegisterWhenEvolutionDisabled() throws Exception {
+    catalog.createTable(tableId, icebergSchema);
+    Schema wider =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.required(2, "name", Types.StringType.get()),
+            Types.NestedField.required(3, "age", Types.IntegerType.get()),
+            Types.NestedField.optional(4, "email", Types.StringType.get()));
+    String file = writeWithSchema("wider.parquet", wider, widerRecord(wider));
+
+    PCollectionTuple out = convert(SchemaEvolutionConfig.disabled(), file);
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.ERRORS)).empty();
+    PAssert.thatSingleton(out.get(AddFiles.ConvertToDataFile.DATA_FILES).apply(Count.globally()))
+        .isEqualTo(1L);
+    pipeline.run().waitUntilFinish();
+  }
+
+  @Test
+  public void testUnreadableSchemaRoutesToErrorsWithConverterMessage() throws Exception {
+    catalog.createTable(tableId, icebergSchema);
+    // a legacy unannotated repeated field: readable Parquet, rejected by Iceberg's converter
+    org.apache.parquet.schema.MessageType legacy =
+        org.apache.parquet.schema.Types.buildMessage()
+            .required(org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32)
+            .named("id")
+            .repeated(org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32)
+            .named("vals")
+            .named("root");
+    File legacyFile = new File(temp.getRoot(), "legacy.parquet");
+    try (org.apache.parquet.hadoop.ParquetWriter<org.apache.parquet.example.data.Group> writer =
+        org.apache.parquet.hadoop.example.ExampleParquetWriter.builder(
+                new org.apache.hadoop.fs.Path(legacyFile.getAbsolutePath()))
+            .withType(legacy)
+            .build()) {
+      org.apache.parquet.example.data.Group group =
+          new org.apache.parquet.example.data.simple.SimpleGroupFactory(legacy).newGroup();
+      group.add("id", 1);
+      group.add("vals", 2);
+      writer.write(group);
+    }
+    String file = legacyFile.getAbsolutePath();
+
+    PCollectionTuple out = convert(ADDITIONS, file);
+    assertSingleError(out, file, AddFiles.ConvertToDataFile.UNREADABLE_SCHEMA_ERROR);
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.ERRORS))
+        .satisfies(
+            rows -> {
+              assertThat(
+                  Iterables.getOnlyElement(rows).getString("error"),
+                  containsString("repetition REPEATED"));
+              return null;
+            });
+    pipeline.run().waitUntilFinish();
+  }
+
+  private static SchemaEvolutionConfig pinned(String column) {
+    return SchemaEvolutionConfig.builder()
+        .setOptions(Arrays.asList(SchemaEvolutionOption.values()))
+        .setRequiredColumns(Arrays.asList(column))
+        .build();
+  }
+
+  private static final Schema OPTIONAL_NAME =
+      new Schema(
+          Types.NestedField.required(1, "id", Types.IntegerType.get()),
+          Types.NestedField.optional(2, "name", Types.StringType.get()),
+          Types.NestedField.required(3, "age", Types.IntegerType.get()));
+
+  @Test
+  public void testPinnedColumnWithNullsRoutesToErrors() throws Exception {
+    catalog.createTable(tableId, OPTIONAL_NAME);
+    String file =
+        writeWithSchema(
+            "nulls.parquet",
+            OPTIONAL_NAME,
+            GenericRecord.create(OPTIONAL_NAME).copy("id", 1, "name", "a", "age", 1),
+            GenericRecord.create(OPTIONAL_NAME).copy("id", 2, "age", 2));
+    PCollectionTuple out = convert(pinned("name"), file);
+    assertSingleError(out, file, "Pinned required column name has 1 null(s)");
+    pipeline.run().waitUntilFinish();
+  }
+
+  @Test
+  public void testPinnedColumnAbsentRoutesToErrors() throws Exception {
+    catalog.createTable(tableId, OPTIONAL_NAME);
+    Schema withoutName =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.required(3, "age", Types.IntegerType.get()));
+    String file =
+        writeWithSchema(
+            "noname.parquet",
+            withoutName,
+            GenericRecord.create(withoutName).copy("id", 1, "age", 1));
+    PCollectionTuple out = convert(pinned("name"), file);
+    assertSingleError(out, file, "Pinned required column name is absent from the file");
+    pipeline.run().waitUntilFinish();
+  }
+
+  @Test
+  public void testPinnedColumnProvenNullFreeRegisters() throws Exception {
+    catalog.createTable(tableId, OPTIONAL_NAME);
+    String file =
+        writeWithSchema(
+            "clean.parquet",
+            OPTIONAL_NAME,
+            GenericRecord.create(OPTIONAL_NAME).copy("id", 1, "name", "a", "age", 1));
+    PCollectionTuple out = convert(pinned("name"), file);
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.ERRORS)).empty();
+    PAssert.thatSingleton(out.get(AddFiles.ConvertToDataFile.DATA_FILES).apply(Count.globally()))
+        .isEqualTo(1L);
+    pipeline.run().waitUntilFinish();
+  }
+
+  @Test
+  public void testPinnedColumnZeroRowFileRegisters() throws Exception {
+    catalog.createTable(tableId, OPTIONAL_NAME);
+    // Iceberg's writer creates no file for zero rows; parquet-avro does.
+    File empty = new File(temp.getRoot(), "empty.parquet");
+    org.apache.avro.Schema avro =
+        org.apache.avro.SchemaBuilder.record("r")
+            .fields()
+            .requiredInt("id")
+            .optionalString("name")
+            .requiredInt("age")
+            .endRecord();
+    org.apache.parquet.avro.AvroParquetWriter.builder(
+            new org.apache.hadoop.fs.Path(empty.getAbsolutePath()))
+        .withSchema(avro)
+        .build()
+        .close();
+    String file = empty.getAbsolutePath();
+    PCollectionTuple out = convert(pinned("name"), file);
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.ERRORS)).empty();
+    PAssert.thatSingleton(out.get(AddFiles.ConvertToDataFile.DATA_FILES).apply(Count.globally()))
+        .isEqualTo(1L);
+    pipeline.run().waitUntilFinish();
   }
 }
