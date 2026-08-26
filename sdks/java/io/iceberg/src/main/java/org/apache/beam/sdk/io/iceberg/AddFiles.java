@@ -98,6 +98,7 @@ import org.apache.iceberg.parquet.ParquetUtil;
 import org.apache.iceberg.transforms.Transform;
 import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.types.Type;
+import org.apache.iceberg.types.Types;
 import org.apache.parquet.hadoop.metadata.FileMetaData;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.schema.MessageType;
@@ -260,8 +261,10 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
     private final @Nullable List<String> partitionFields;
     private final @Nullable List<String> sortFields;
     private final @Nullable Map<String, String> tableProps;
+    private final SchemaEvolutionConfig evolution;
     private transient @MonotonicNonNull BoundedAsyncTasks<ProcessResult> tasks;
     private transient volatile @MonotonicNonNull Table table;
+    private transient volatile boolean warnedEmptySchema;
 
     // Number of parallel threads processing incoming files
     private static final int THREAD_POOL_SIZE = 10;
@@ -274,17 +277,39 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
         @Nullable List<String> partitionFields,
         @Nullable List<String> sortFields,
         @Nullable Map<String, String> tableProps) {
+      this(
+          catalogConfig,
+          identifier,
+          prefix,
+          partitionFields,
+          sortFields,
+          tableProps,
+          SchemaEvolutionConfig.disabled());
+    }
+
+    public ConvertToDataFile(
+        IcebergCatalogConfig catalogConfig,
+        String identifier,
+        @Nullable String prefix,
+        @Nullable List<String> partitionFields,
+        @Nullable List<String> sortFields,
+        @Nullable Map<String, String> tableProps,
+        SchemaEvolutionConfig evolution) {
       this.catalogConfig = catalogConfig;
       this.identifier = identifier;
       this.prefix = prefix;
       this.partitionFields = partitionFields;
       this.sortFields = sortFields;
       this.tableProps = tableProps;
+      this.evolution = evolution;
     }
 
     static final String PREFIX_ERROR = "File path did not start with the specified prefix";
     private static final String UNKNOWN_FORMAT_ERROR = "Could not determine the file's format";
     static final String UNKNOWN_PARTITION_ERROR = "Could not determine the file's partition: ";
+    static final String UNREADABLE_SCHEMA_ERROR = "Could not read the file's schema: ";
+    static final String UNCOVERED_ERROR = "Table schema does not cover the file after refresh: ";
+    static final String PINNED_COLUMN_ERROR = "Pinned required column ";
 
     private static class ProcessResult {
       final @Nullable SerializableDataFile dataFile;
@@ -411,13 +436,34 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
           return errorResult(filePath, PREFIX_ERROR, timestamp, window, paneInfo);
         }
 
+        if (table.schema().columns().isEmpty() && !warnedEmptySchema) {
+          warnedEmptySchema = true;
+          LOG.warn(
+              "Table {} has no columns: files register with no readable columns and no stats."
+                  + " Enable schema evolution to infer the schema from the files.",
+              identifier);
+        }
+
         // ---- Per-file phase: every failure below is one error row, never a failed bundle.
         @Nullable ParquetMetadata parquetFooter = null;
+        org.apache.iceberg.@Nullable Schema fileSchema = null;
         if (format.equals(FileFormat.PARQUET)) {
           try {
             parquetFooter = ParquetFooters.read(filePath);
           } catch (Exception e) {
             return errorResult(filePath, errorMessage(e), timestamp, window, paneInfo);
+          }
+          if (evolution.isEnabled()) {
+            try {
+              fileSchema = FileSchemas.effective(parquetFooter);
+            } catch (Exception e) {
+              return errorResult(
+                  filePath, UNREADABLE_SCHEMA_ERROR + errorMessage(e), timestamp, window, paneInfo);
+            }
+            @Nullable String uncovered = uncoveredReason(fileSchema);
+            if (uncovered != null) {
+              return errorResult(filePath, uncovered, timestamp, window, paneInfo);
+            }
           }
         }
 
@@ -434,6 +480,13 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
                   parquetFooter);
         } catch (Exception e) {
           return errorResult(filePath, errorMessage(e), timestamp, window, paneInfo);
+        }
+
+        if (fileSchema != null) {
+          @Nullable String pinViolation = pinViolation(fileSchema, metrics);
+          if (pinViolation != null) {
+            return errorResult(filePath, pinViolation, timestamp, window, paneInfo);
+          }
         }
 
         // Figure out which partition this DataFile should go to
@@ -470,6 +523,60 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
           return errorResult(filePath, errorMessage(e), timestamp, window, paneInfo);
         }
       };
+    }
+
+    /**
+     * The pre-pass commits the schema before paths reach this stage, so the cached table normally
+     * covers every file. If not, refresh once (a commit may have landed since the table was cached)
+     * and report the remaining delta. Never changes the schema.
+     */
+    private @Nullable String uncoveredReason(org.apache.iceberg.Schema fileSchema) {
+      Table table = checkStateNotNull(this.table);
+      SchemaDelta delta = SchemaDelta.classify(table, fileSchema);
+      if (delta.isEmpty()) {
+        return null;
+      }
+      synchronized (this) {
+        table.refresh();
+      }
+      delta = SchemaDelta.classify(table, fileSchema);
+      if (delta.isEmpty()) {
+        return null;
+      }
+      String reason = delta.disallowedReason(evolution);
+      if (reason.isEmpty()) {
+        reason = "changes not applied: " + String.join("; ", delta.descriptions());
+      }
+      return UNCOVERED_ERROR + reason;
+    }
+
+    /**
+     * A pinned column must be present and provably null-free; a zero-row file is vacuously fine.
+     */
+    private @Nullable String pinViolation(org.apache.iceberg.Schema fileSchema, Metrics metrics) {
+      Table table = checkStateNotNull(this.table);
+      for (String pinned : evolution.getRequiredColumns()) {
+        Types.NestedField tableField = table.schema().findField(pinned);
+        if (tableField == null) {
+          continue;
+        }
+        if (fileSchema.findField(pinned) == null) {
+          return PINNED_COLUMN_ERROR + pinned + " is absent from the file";
+        }
+        Long rows = metrics.recordCount();
+        if (rows != null && rows == 0) {
+          continue;
+        }
+        Map<Integer, Long> nullCounts = metrics.nullValueCounts();
+        Long nulls = nullCounts == null ? null : nullCounts.get(tableField.fieldId());
+        if (nulls == null) {
+          return PINNED_COLUMN_ERROR + pinned + " has no null count statistics in the file";
+        }
+        if (nulls > 0) {
+          return PINNED_COLUMN_ERROR + pinned + " has " + nulls + " null(s) in the file";
+        }
+      }
+      return null;
     }
 
     private static ProcessResult errorResult(
