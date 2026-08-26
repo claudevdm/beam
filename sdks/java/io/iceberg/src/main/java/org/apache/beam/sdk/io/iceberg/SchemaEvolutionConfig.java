@@ -17,10 +17,15 @@
  */
 package org.apache.beam.sdk.io.iceberg;
 
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+
 import com.google.auto.value.AutoValue;
 import java.io.Serializable;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -33,6 +38,8 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * SchemaEvolutionConfig.builder()
  *     .setOptions(EnumSet.of(ALLOW_FIELD_ADDITION, ALLOW_FIELD_RELAXATION, ALLOW_TYPE_PROMOTION))
  *     .setRequiredColumns(Set.of("id", "address.city"))   // never relaxed
+ *     .withColumnAliases(Map.of("amt", "amount"))          // file name -> table name
+ *     .setIgnoredColumns(List.of("debug_payload"))         // never added
  *     .setIncompatibleSchemaHandling(IncompatibleSchemaHandling.ROUTE_TO_ERRORS)
  *     .build();
  * }</pre>
@@ -44,6 +51,17 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * fields, with the container segment spelled out under lists and maps ({@code
  * addresses.element.city}, {@code attributes.value.total}). A top-level column whose own name
  * contains a dot cannot be pinned.
+ *
+ * <p><b>Aliases.</b> Column aliases map a file column name to the table column it stands for (alias
+ * to canonical, dotted paths for nested fields, leaf rename within the same parent). Aliased files
+ * are classified, registered and read as if they carried the canonical name; the alias is added to
+ * the table's name mapping so readers resolve it and stats are collected for the canonical column.
+ * No self mapping, no chains, case sensitive; an alias cannot be pinned or ignored; a file carrying
+ * both alias and canonical name is unreadable for schema purposes.
+ *
+ * <p><b>Ignored columns.</b> Dropped from file schemas before anything else looks at them, so they
+ * are never added to the table; the file bytes are untouched. A column the table already has cannot
+ * be ignored: readers resolve it through the name mapping and stats are collected for it.
  *
  * <p><b>Incompatible schemas.</b> A schema that needs a change the options do not allow, or that
  * conflicts with the table or with another file's schema. {@link IncompatibleSchemaHandling}
@@ -81,6 +99,12 @@ public abstract class SchemaEvolutionConfig implements Serializable {
     return getRequiredColumns().contains(columnPath);
   }
 
+  /** File column path to the table column path it stands for; see the class docs for the rules. */
+  public abstract Map<String, String> getColumnAliases();
+
+  /** Column paths dropped from every file schema, so never added to the table. */
+  public abstract Set<String> getIgnoredColumns();
+
   /**
    * Unset resolves by mode: {@code FAIL_PIPELINE} in batch, {@code ROUTE_TO_ERRORS} in streaming.
    */
@@ -117,7 +141,49 @@ public abstract class SchemaEvolutionConfig implements Serializable {
   public static Builder builder() {
     return new AutoValue_SchemaEvolutionConfig.Builder()
         .setOptions(Collections.emptySet())
-        .setRequiredColumns(Collections.emptySet());
+        .setRequiredColumns(Collections.emptySet())
+        .setColumnAliases(Collections.emptyMap())
+        .setIgnoredColumns(Collections.emptySet());
+  }
+
+  /**
+   * Aliases, pins and ignores must not contradict each other: an alias maps to a real canonical
+   * name (no self map, no chain, same parent), pins and ignores name canonical columns, and a
+   * column is never both pinned and ignored.
+   */
+  private static void validate(Map<String, String> aliases, Set<String> pins, Set<String> ignored) {
+    for (Map.Entry<String, String> alias : aliases.entrySet()) {
+      String from = alias.getKey();
+      String to = alias.getValue();
+      checkArgument(!from.isEmpty() && !to.isEmpty(), "Empty column alias: '%s' -> '%s'", from, to);
+      checkArgument(!from.equals(to), "Column alias '%s' maps to itself", from);
+      checkArgument(
+          !aliases.containsKey(to),
+          "Column alias '%s' -> '%s' chains into another alias; map every alias directly to its"
+              + " canonical name",
+          from,
+          to);
+      checkArgument(
+          parent(from).equals(parent(to)),
+          "Column alias '%s' -> '%s' must rename a field within the same parent",
+          from,
+          to);
+      checkArgument(
+          !pins.contains(from), "Pinned column '%s' is an alias; pin the canonical name", from);
+      checkArgument(
+          !ignored.contains(from) && !ignored.contains(to),
+          "Column alias '%s' -> '%s' names an ignored column",
+          from,
+          to);
+    }
+    for (String column : ignored) {
+      checkArgument(!pins.contains(column), "Column '%s' is both pinned and ignored", column);
+    }
+  }
+
+  private static String parent(String path) {
+    int dot = path.lastIndexOf('.');
+    return dot < 0 ? "" : path.substring(0, dot);
   }
 
   @AutoValue.Builder
@@ -129,9 +195,26 @@ public abstract class SchemaEvolutionConfig implements Serializable {
     public abstract Builder setIncompatibleSchemaHandling(
         @Nullable IncompatibleSchemaHandling handling);
 
+    abstract Builder setColumnAliases(Map<String, String> aliases);
+
+    /** Alias to canonical column path. */
+    public Builder withColumnAliases(Map<String, String> aliases) {
+      return setColumnAliases(Collections.unmodifiableMap(new LinkedHashMap<>(aliases)));
+    }
+
+    abstract Builder setIgnoredColumns(Set<String> ignored);
+
+    public Builder setIgnoredColumns(Iterable<String> ignored) {
+      Set<String> copy = new LinkedHashSet<>();
+      for (String column : ignored) {
+        copy.add(column);
+      }
+      return setIgnoredColumns(Collections.unmodifiableSet(copy));
+    }
+
     abstract SchemaEvolutionConfig autoBuild();
 
-    /** Pins and handling without an option would silently do nothing, so they are rejected. */
+    /** Any setting without an option would silently do nothing, so they are rejected. */
     public SchemaEvolutionConfig build() {
       SchemaEvolutionConfig config = autoBuild();
       for (String column : config.getRequiredColumns()) {
@@ -143,9 +226,12 @@ public abstract class SchemaEvolutionConfig implements Serializable {
       Preconditions.checkArgument(
           config.isEnabled()
               || (config.getRequiredColumns().isEmpty()
+                  && config.getColumnAliases().isEmpty()
+                  && config.getIgnoredColumns().isEmpty()
                   && config.getIncompatibleSchemaHandling() == null),
-          "required columns and incompatible schema handling need at least one schema evolution"
-              + " option");
+          "required columns, column aliases, ignored columns and incompatible schema handling need"
+              + " at least one schema evolution option");
+      validate(config.getColumnAliases(), config.getRequiredColumns(), config.getIgnoredColumns());
       return config;
     }
   }

@@ -52,15 +52,17 @@ class ReadFooterSchema extends DoFn<String, CollectDistinctSchemas.SchemaGroup> 
   private static final Counter numFooterReadErrors =
       counter(ReadFooterSchema.class, FOOTER_READ_ERRORS_COUNTER);
 
+  private final SchemaEvolutionConfig config;
   private final int threadPoolSize;
   private final int maxInFlightTasks;
   private transient @MonotonicNonNull BoundedAsyncTasks<ReadResult> tasks;
 
-  ReadFooterSchema() {
-    this(DEFAULT_THREAD_POOL_SIZE, DEFAULT_MAX_IN_FLIGHT_TASKS);
+  ReadFooterSchema(SchemaEvolutionConfig config) {
+    this(config, DEFAULT_THREAD_POOL_SIZE, DEFAULT_MAX_IN_FLIGHT_TASKS);
   }
 
-  ReadFooterSchema(int threadPoolSize, int maxInFlightTasks) {
+  ReadFooterSchema(SchemaEvolutionConfig config, int threadPoolSize, int maxInFlightTasks) {
+    this.config = config;
     this.threadPoolSize = threadPoolSize;
     this.maxInFlightTasks = maxInFlightTasks;
   }
@@ -148,7 +150,7 @@ class ReadFooterSchema extends DoFn<String, CollectDistinctSchemas.SchemaGroup> 
     }
   }
 
-  private static Callable<ReadResult> createReadTask(
+  private Callable<ReadResult> createReadTask(
       String filePath, Instant timestamp, BoundedWindow window, PaneInfo paneInfo) {
     return () -> {
       FileFormat format;
@@ -162,7 +164,8 @@ class ReadFooterSchema extends DoFn<String, CollectDistinctSchemas.SchemaGroup> 
       }
       try {
         ParquetMetadata footer = ParquetFooters.read(filePath);
-        return new ReadResult(FileSchemas.schemaGroup(footer), false, timestamp, window, paneInfo);
+        return new ReadResult(
+            FileSchemas.schemaGroup(footer, config), false, timestamp, window, paneInfo);
       } catch (Exception e) {
         LOG.warn(
             "Could not read the footer of {}; the file will not contribute to schema inference: {}",
