@@ -81,6 +81,40 @@ public class AddFilesSchemaTransformProviderTest {
   }
 
   @Test
+  public void testAliasesAndIgnoredColumnsParsed() {
+    SchemaEvolutionConfig config =
+        base()
+            .setSchemaEvolutionOptions(Arrays.asList("ALLOW_FIELD_ADDITION"))
+            .setColumnAliases(ImmutableMap.of("amt", "amount"))
+            .setIgnoredColumns(Arrays.asList("debug"))
+            .build()
+            .getSchemaEvolution();
+    assertNotNull(config);
+    assertEquals("amount", config.getColumnAliases().get("amt"));
+    assertTrue(config.getIgnoredColumns().contains("debug"));
+  }
+
+  @Test
+  public void testAliasesWithoutOptionsRejected() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            base().setColumnAliases(ImmutableMap.of("amt", "amount")).build().getSchemaEvolution());
+  }
+
+  @Test
+  public void testInvalidAliasRejectedByConfigValidation() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            base()
+                .setSchemaEvolutionOptions(Arrays.asList("ALLOW_FIELD_ADDITION"))
+                .setColumnAliases(ImmutableMap.of("a", "a"))
+                .build()
+                .getSchemaEvolution());
+  }
+
+  @Test
   public void testInvalidOptionListsValidValues() {
     IllegalArgumentException e =
         assertThrows(

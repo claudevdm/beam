@@ -432,6 +432,62 @@ public class CommitSchemaUnionTest {
     assertTrue(NameMappingUtils.covers(mapping, table.schema().asStruct()));
   }
 
+  // ---- aliases
+
+  private static SchemaEvolutionConfig withAlias(String from, String to) {
+    return SchemaEvolutionConfig.builder()
+        .setOptions(Arrays.asList(SchemaEvolutionOption.values()))
+        .withColumnAliases(java.util.Collections.singletonMap(from, to))
+        .build();
+  }
+
+  @Test
+  public void testAliasIsAddedToTheMappingEvenWithoutSchemaChanges() {
+    seedNameMapping();
+    int before = metadataVersion(load());
+    commit(withAlias("nm", "name"), IncompatibleSchemaHandling.FAIL_PIPELINE, files(TABLE, 1));
+    Table table = load();
+    assertEquals("one commit for the mapping", before + 1, metadataVersion(table));
+    NameMapping mapping =
+        NameMappingUtils.parseOrNull(table.properties().get(TableProperties.DEFAULT_NAME_MAPPING));
+    assertNotNull(mapping);
+    assertEquals(mapping.find("name").id(), mapping.find("nm").id());
+    // and nothing more to commit next time
+    int after = metadataVersion(table);
+    commit(withAlias("nm", "name"), IncompatibleSchemaHandling.FAIL_PIPELINE, files(TABLE, 1));
+    assertEquals(after, metadataVersion(load()));
+  }
+
+  @Test
+  public void testAliasAppliedTogetherWithASchemaChange() {
+    Schema file =
+        new Schema(
+            required(1, "id", Types.LongType.get()),
+            required(2, "region", Types.StringType.get()),
+            optional(3, "email", Types.StringType.get()));
+    commit(withAlias("nm", "name"), IncompatibleSchemaHandling.FAIL_PIPELINE, files(file, 1));
+    Table table = load();
+    NameMapping mapping =
+        NameMappingUtils.parseOrNull(table.properties().get(TableProperties.DEFAULT_NAME_MAPPING));
+    assertNotNull(mapping);
+    assertNotNull(mapping.find("email"));
+    assertEquals(mapping.find("name").id(), mapping.find("nm").id());
+  }
+
+  @Test
+  public void testAliasForAColumnAddedInTheSameCommit() {
+    Schema file =
+        new Schema(
+            required(1, "id", Types.LongType.get()),
+            required(2, "region", Types.StringType.get()),
+            optional(3, "email", Types.StringType.get()));
+    commit(withAlias("eml", "email"), IncompatibleSchemaHandling.FAIL_PIPELINE, files(file, 1));
+    NameMapping mapping =
+        NameMappingUtils.parseOrNull(load().properties().get(TableProperties.DEFAULT_NAME_MAPPING));
+    assertNotNull(mapping);
+    assertEquals(mapping.find("email").id(), mapping.find("eml").id());
+  }
+
   // ---- retry
 
   @Test

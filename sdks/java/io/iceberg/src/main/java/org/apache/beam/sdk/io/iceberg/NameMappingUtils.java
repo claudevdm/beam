@@ -21,13 +21,16 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Ascii;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.mapping.MappedField;
 import org.apache.iceberg.mapping.MappedFields;
@@ -142,6 +145,134 @@ class NameMappingUtils {
           AddFiles.errorMessage(e));
       return NameMappingParser.toJson(generated);
     }
+  }
+
+  /**
+   * Adds each configured alias to the {@code names} of its canonical field, at the right nesting
+   * level, so files carrying the alias resolve to the canonical id at read time. An alias whose
+   * canonical column is not in the schema yet is left for a later regeneration; an alias that would
+   * shadow a real column or another mapping entry at its level is skipped with a warning.
+   * Idempotent.
+   */
+  static NameMapping withAliases(NameMapping mapping, Schema schema, Map<String, String> aliases) {
+    if (aliases.isEmpty()) {
+      return mapping;
+    }
+    Map<String, String> applicable = applicableAliases(mapping, schema, aliases);
+    if (applicable.isEmpty()) {
+      return mapping;
+    }
+    return NameMapping.of(addAliases(mapping.asMappedFields(), schema, "", applicable));
+  }
+
+  /**
+   * The mapping to collect stats through: the table's stored mapping when it parses and covers the
+   * schema (it carries user and configured aliases), otherwise a regenerated one; configured
+   * aliases applied either way. Aliased file columns only get stats through an aliased mapping.
+   */
+  static NameMapping forStats(Table table, Map<String, String> aliases) {
+    Schema schema = table.schema();
+    @Nullable
+    NameMapping stored = parseOrNull(table.properties().get(TableProperties.DEFAULT_NAME_MAPPING));
+    NameMapping base;
+    if (stored != null && covers(stored, schema.asStruct())) {
+      base = stored;
+    } else {
+      base = NameMappingParser.fromJson(regenerate(schema, stored));
+    }
+    return withAliases(base, schema, aliases);
+  }
+
+  /** Whether every applicable alias already resolves to its canonical field. */
+  static boolean hasAliases(NameMapping mapping, Schema schema, Map<String, String> aliases) {
+    for (Map.Entry<String, String> alias : applicableAliases(mapping, schema, aliases).entrySet()) {
+      @Nullable MappedField byAlias = mapping.find(alias.getKey());
+      @Nullable MappedField byCanonical = mapping.find(alias.getValue());
+      if (byAlias == null
+          || byCanonical == null
+          || !Objects.equals(byAlias.id(), byCanonical.id())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static Map<String, String> applicableAliases(
+      NameMapping mapping, Schema schema, Map<String, String> aliases) {
+    Map<String, String> applicable = new LinkedHashMap<>();
+    for (Map.Entry<String, String> alias : aliases.entrySet()) {
+      String from = alias.getKey();
+      String to = alias.getValue();
+      Types.NestedField canonical = schema.findField(to);
+      if (canonical == null) {
+        continue;
+      }
+      if (schema.findField(from) != null) {
+        LOG.warn(
+            "Ignoring column alias '{}' -> '{}': the table has a real column named '{}'",
+            from,
+            to,
+            from);
+        continue;
+      }
+      @Nullable MappedField byAlias = mapping.find(from);
+      if (byAlias != null && !Objects.equals(byAlias.id(), canonical.fieldId())) {
+        LOG.warn(
+            "Ignoring column alias '{}' -> '{}': the name mapping already resolves '{}' to field"
+                + " id {}",
+            from,
+            to,
+            from,
+            byAlias.id());
+        continue;
+      }
+      applicable.put(from, to);
+    }
+    return applicable;
+  }
+
+  private static MappedFields addAliases(
+      MappedFields fields, Schema schema, String prefix, Map<String, String> aliases) {
+    List<MappedField> rebuilt = new ArrayList<>();
+    for (MappedField field : fields.fields()) {
+      Set<String> names = new LinkedHashSet<>();
+      for (String name : field.names()) {
+        names.add(name);
+      }
+      for (Map.Entry<String, String> alias : aliases.entrySet()) {
+        String canonical = alias.getValue();
+        if (parent(canonical).equals(prefix) && names.contains(leaf(canonical))) {
+          names.add(leaf(alias.getKey()));
+        }
+      }
+      @Nullable MappedFields nested = field.nestedMapping();
+      if (nested != null) {
+        @Nullable Integer id = field.id();
+        String path = id != null ? schema.findColumnName(id) : null;
+        if (path == null) {
+          path =
+              prefix.isEmpty()
+                  ? leaf(names.iterator().next())
+                  : prefix + "." + names.iterator().next();
+        }
+        nested = addAliases(nested, schema, path, aliases);
+      }
+      if (nested == null) {
+        rebuilt.add(MappedField.of(field.id(), new ArrayList<>(names)));
+      } else {
+        rebuilt.add(MappedField.of(field.id(), new ArrayList<>(names), nested));
+      }
+    }
+    return MappedFields.of(rebuilt);
+  }
+
+  private static String parent(String path) {
+    int dot = path.lastIndexOf('.');
+    return dot < 0 ? "" : path.substring(0, dot);
+  }
+
+  private static String leaf(String path) {
+    return path.substring(path.lastIndexOf('.') + 1);
   }
 
   // Duplicate ids cannot survive parsing (NameMapping rejects them); the name-set union is

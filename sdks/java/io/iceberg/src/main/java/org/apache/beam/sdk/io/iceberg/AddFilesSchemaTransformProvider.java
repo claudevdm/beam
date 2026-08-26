@@ -134,6 +134,20 @@ public class AddFilesSchemaTransformProvider extends TypedSchemaTransformProvide
     public abstract @Nullable List<String> getRequiredColumns();
 
     @SchemaFieldDescription(
+        "Column aliases, alias to canonical (e.g. {\"amt\": \"amount\"}, dotted paths for nested"
+            + " fields, renaming within the same parent). A file column named by an alias is"
+            + " treated as the canonical column everywhere, and the alias is added to the table's"
+            + " name mapping so such files stay readable. Matching is case sensitive.")
+    public abstract @Nullable Map<String, String> getColumnAliases();
+
+    @SchemaFieldDescription(
+        "Columns (dotted paths) dropped from every file schema before schema evolution, so they"
+            + " are never added to the table. The file bytes are untouched. A column the table"
+            + " already has is not affected: it stays readable and gets stats. Must not name a"
+            + " pinned column or an alias.")
+    public abstract @Nullable List<String> getIgnoredColumns();
+
+    @SchemaFieldDescription(
         "What to do when a file's schema is incompatible with the table (needs a change that"
             + " is not allowed, or conflicts with the table or another file): FAIL_PIPELINE"
             + " fails the pipeline before any schema change is committed; ROUTE_TO_ERRORS skips"
@@ -172,6 +186,10 @@ public class AddFilesSchemaTransformProvider extends TypedSchemaTransformProvide
 
       public abstract Builder setIncompatibleSchemaHandling(String handling);
 
+      public abstract Builder setColumnAliases(Map<String, String> aliases);
+
+      public abstract Builder setIgnoredColumns(List<String> columns);
+
       public abstract Configuration build();
     }
 
@@ -180,17 +198,21 @@ public class AddFilesSchemaTransformProvider extends TypedSchemaTransformProvide
       List<String> optionNames = getSchemaEvolutionOptions();
       List<String> pins = getRequiredColumns();
       String handlingName = getIncompatibleSchemaHandling();
+      Map<String, String> aliases = getColumnAliases();
+      List<String> ignored = getIgnoredColumns();
       boolean nothingSet =
           (optionNames == null || optionNames.isEmpty())
               && (pins == null || pins.isEmpty())
-              && handlingName == null;
+              && handlingName == null
+              && (aliases == null || aliases.isEmpty())
+              && (ignored == null || ignored.isEmpty());
       if (nothingSet) {
         return null;
       }
       Preconditions.checkArgument(
           optionNames != null && !optionNames.isEmpty(),
-          "required_columns and incompatible_schema_handling need at least one"
-              + " schema_evolution_options entry");
+          "required_columns, column_aliases, ignored_columns and incompatible_schema_handling"
+              + " need at least one schema_evolution_options entry");
       List<SchemaEvolutionOption> options = new java.util.ArrayList<>();
       for (String name : checkStateNotNull(optionNames)) {
         options.add(parseEnum(SchemaEvolutionOption.class, name, "schema_evolution_options"));
@@ -198,6 +220,12 @@ public class AddFilesSchemaTransformProvider extends TypedSchemaTransformProvide
       SchemaEvolutionConfig.Builder builder = SchemaEvolutionConfig.builder().setOptions(options);
       if (pins != null) {
         builder = builder.setRequiredColumns(pins);
+      }
+      if (aliases != null) {
+        builder = builder.withColumnAliases(aliases);
+      }
+      if (ignored != null) {
+        builder = builder.setIgnoredColumns(ignored);
       }
       if (handlingName != null) {
         builder =

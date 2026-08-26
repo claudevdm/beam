@@ -21,6 +21,9 @@ import static org.apache.iceberg.types.Types.NestedField.optional;
 import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.io.File;
@@ -209,7 +212,8 @@ public class FileSchemasTest {
   public void testCanonicalWithNullFreeColumnsReportsChangedOnly() throws IOException {
     ParquetMetadata footer =
         write(10, 1, true, new Nulls(r -> false, r -> false, r -> false, r -> r == 4));
-    CollectDistinctSchemas.SchemaGroup group = FileSchemas.schemaGroup(footer);
+    CollectDistinctSchemas.SchemaGroup group =
+        FileSchemas.schemaGroup(footer, SchemaEvolutionConfig.disabled());
     // id is declared required already; zip has a null; the rest flipped
     assertEquals(java.util.Arrays.asList("address", "address.city", "name"), group.nullFreeColumns);
     Schema declared = SchemaParser.fromJson(group.schemaJson);
@@ -284,6 +288,124 @@ public class FileSchemasTest {
     Types.NestedField b = canonical.findField("b");
     assertEquals("the b", b.doc());
     assertEquals(7L, b.writeDefault());
+  }
+
+  // ---- aliases and ignored columns
+
+  private static SchemaEvolutionConfig.Builder enabled() {
+    return SchemaEvolutionConfig.builder()
+        .setOptions(java.util.Arrays.asList(SchemaEvolutionOption.ALLOW_FIELD_ADDITION));
+  }
+
+  private static java.util.Map<String, String> alias(String from, String to) {
+    return java.util.Collections.singletonMap(from, to);
+  }
+
+  @Test
+  public void testAliasRenamesTopLevelAndNestedColumns() throws IOException {
+    ParquetMetadata footer = write(10, 1, true, Nulls.NONE);
+    java.util.Map<String, String> aliases = new java.util.LinkedHashMap<>();
+    aliases.put("name", "full_name");
+    aliases.put("address.zip", "address.postal_code");
+    Schema schema = FileSchemas.effective(footer, enabled().withColumnAliases(aliases).build());
+    assertNotNull(schema.findField("full_name"));
+    assertNull(schema.findField("name"));
+    assertNotNull(schema.findField("address.postal_code"));
+    assertNull(schema.findField("address.zip"));
+    assertEquals(2, schema.findField("full_name").fieldId());
+  }
+
+  @Test
+  public void testAliasIsTightenedUnderTheCanonicalName() throws IOException {
+    ParquetMetadata footer = write(10, 1, true, Nulls.NONE);
+    Schema schema =
+        FileSchemas.effective(
+            footer, enabled().withColumnAliases(alias("name", "full_name")).build());
+    assertTrue(
+        "tighten sees the file name, rename keeps the proof", isRequired(schema, "full_name"));
+    ParquetMetadata withNulls =
+        write(10, 1, true, new Nulls(r -> r == 1, r -> false, r -> false, r -> false));
+    Schema optionalSchema =
+        FileSchemas.effective(
+            withNulls, enabled().withColumnAliases(alias("name", "full_name")).build());
+    assertFalse(isRequired(optionalSchema, "full_name"));
+  }
+
+  @Test
+  public void testAliasAbsentFromFileIsANoOp() throws IOException {
+    ParquetMetadata footer = write(10, 1, true, Nulls.NONE);
+    Schema plain = FileSchemas.effective(footer, enabled().build());
+    Schema aliased =
+        FileSchemas.effective(
+            footer, enabled().withColumnAliases(alias("nickname", "name")).build());
+    assertTrue(plain.sameSchema(aliased));
+  }
+
+  @Test
+  public void testAliasCollidingWithAPresentCanonicalColumnIsUnreadable() throws IOException {
+    // the file has both "name" and "id"; aliasing id -> name would duplicate a name
+    ParquetMetadata footer = write(10, 1, true, Nulls.NONE);
+    assertThrows(
+        org.apache.iceberg.exceptions.ValidationException.class,
+        () ->
+            FileSchemas.effective(
+                footer, enabled().withColumnAliases(alias("id", "name")).build()));
+  }
+
+  @Test
+  public void testIgnoredColumnsAreDroppedAtAnyDepth() throws IOException {
+    ParquetMetadata footer = write(10, 1, true, Nulls.NONE);
+    Schema schema =
+        FileSchemas.effective(
+            footer,
+            enabled().setIgnoredColumns(java.util.Arrays.asList("name", "address.zip")).build());
+    assertNull(schema.findField("name"));
+    assertNull(schema.findField("address.zip"));
+    assertNotNull(schema.findField("address.city"));
+    assertNotNull(schema.findField("id"));
+  }
+
+  @Test
+  public void testIgnoringEveryChildDropsTheStruct() throws IOException {
+    ParquetMetadata footer = write(10, 1, true, Nulls.NONE);
+    Schema schema =
+        FileSchemas.effective(
+            footer,
+            enabled()
+                .setIgnoredColumns(java.util.Arrays.asList("address.city", "address.zip"))
+                .build());
+    assertNull(schema.findField("address"));
+  }
+
+  @Test
+  public void testIgnoreAppliesAfterAliasSoTheCanonicalNameIsIgnored() throws IOException {
+    ParquetMetadata footer = write(10, 1, true, Nulls.NONE);
+    // the config forbids ignoring an alias or its canonical directly, but an alias into a struct
+    // whose other children are ignored still works on canonical names
+    java.util.Map<String, String> aliases = alias("address.zip", "address.postal_code");
+    Schema schema =
+        FileSchemas.effective(
+            footer,
+            enabled()
+                .withColumnAliases(aliases)
+                .setIgnoredColumns(java.util.Arrays.asList("address.city"))
+                .build());
+    assertNotNull(schema.findField("address.postal_code"));
+    assertNull(schema.findField("address.city"));
+  }
+
+  @Test
+  public void testCanonicalJsonOfAliasedFilesMatchesTheCanonicalFile() throws IOException {
+    ParquetMetadata footer = write(10, 1, true, Nulls.NONE);
+    String viaAlias =
+        FileSchemas.canonicalJson(
+            footer, enabled().withColumnAliases(alias("name", "full_name")).build());
+    // the same file with the canonical name declared directly would produce this JSON
+    Schema declared =
+        FileSchemas.renameAliases(
+            ParquetSchemaUtil.convert(footer.getFileMetaData().getSchema()),
+            alias("name", "full_name"));
+    assertEquals(SchemaParser.toJson(FileSchemas.canonical(declared)), viaAlias);
   }
 
   // ---- canonicalization

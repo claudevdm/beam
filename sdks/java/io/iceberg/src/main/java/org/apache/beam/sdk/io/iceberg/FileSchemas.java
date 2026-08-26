@@ -23,6 +23,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SchemaParser;
@@ -52,28 +53,108 @@ import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 final class FileSchemas {
   private FileSchemas() {}
 
-  /** Canonical JSON of the schema the file declares. */
-  static String canonicalJson(ParquetMetadata footer) {
+  /**
+   * Canonical JSON of the schema the file declares, aliases renamed and ignored columns dropped.
+   */
+  static String canonicalJson(ParquetMetadata footer, SchemaEvolutionConfig config) {
     Schema converted = ParquetSchemaUtil.convert(footer.getFileMetaData().getSchema());
-    return SchemaParser.toJson(canonical(converted));
-  }
-
-  /** This file as a schema group of one: its declared schema and its null-free columns. */
-  static CollectDistinctSchemas.SchemaGroup schemaGroup(ParquetMetadata footer) {
-    Schema converted = ParquetSchemaUtil.convert(footer.getFileMetaData().getSchema());
-    Schema tightened = tighten(converted, footer);
-    return new CollectDistinctSchemas.SchemaGroup(
-        SchemaParser.toJson(canonical(converted)), 1, changedToRequired(converted, tightened));
+    return SchemaParser.toJson(canonical(renameAndDrop(converted, config)));
   }
 
   /**
-   * This one file's schema in table terms: convert, then tighten using its own footer. Uses the
-   * file's own null evidence, not its group's: a file that proves a column null-free registers even
-   * when other files sharing its schema could not prove it.
+   * This file as a schema group of one: its declared schema and its null-free columns, in table
+   * terms. Tightening reads null counts first (they are keyed by the file's own column names);
+   * aliases rename and ignores drop afterwards, on declared and tightened alike, so reported
+   * columns carry canonical names.
    */
-  static Schema effective(ParquetMetadata footer) {
+  static CollectDistinctSchemas.SchemaGroup schemaGroup(
+      ParquetMetadata footer, SchemaEvolutionConfig config) {
     Schema converted = ParquetSchemaUtil.convert(footer.getFileMetaData().getSchema());
-    return tighten(converted, footer);
+    Schema declared = renameAndDrop(converted, config);
+    Schema tightened = renameAndDrop(tighten(converted, footer), config);
+    return new CollectDistinctSchemas.SchemaGroup(
+        SchemaParser.toJson(canonical(declared)), 1, changedToRequired(declared, tightened));
+  }
+
+  /**
+   * This one file's schema in table terms: convert, tighten using its own footer, rename aliases,
+   * drop ignored columns. Uses the file's own null evidence, not its group's: a file that proves a
+   * column null-free registers even when other files sharing its schema could not prove it.
+   */
+  static Schema effective(ParquetMetadata footer, SchemaEvolutionConfig config) {
+    Schema converted = ParquetSchemaUtil.convert(footer.getFileMetaData().getSchema());
+    Schema tightened = tighten(converted, footer);
+    Schema renamed = renameAliases(tightened, config.getColumnAliases());
+    return dropIgnored(renamed, config.getIgnoredColumns());
+  }
+
+  private static Schema renameAndDrop(Schema schema, SchemaEvolutionConfig config) {
+    return dropIgnored(
+        renameAliases(schema, config.getColumnAliases()), config.getIgnoredColumns());
+  }
+
+  /**
+   * Renames aliased columns to their canonical names, at any depth. A file carrying both the alias
+   * and the canonical name ends up with a duplicate name, which Iceberg rejects: that file is
+   * unreadable for schema purposes.
+   */
+  static Schema renameAliases(Schema schema, Map<String, String> aliases) {
+    if (aliases.isEmpty()) {
+      return schema;
+    }
+    return new Schema(renameStruct(schema.asStruct(), "", aliases).fields());
+  }
+
+  private static Types.StructType renameStruct(
+      Types.StructType struct, String prefix, Map<String, String> aliases) {
+    List<Types.NestedField> fields = new ArrayList<>();
+    for (Types.NestedField field : struct.fields()) {
+      String path = prefix + field.name();
+      Type type = field.type();
+      if (type.isStructType()) {
+        type = renameStruct(type.asStructType(), path + ".", aliases);
+      }
+      String canonical = aliases.get(path);
+      Types.NestedField.Builder builder = Types.NestedField.from(field).ofType(type);
+      if (canonical != null) {
+        builder = builder.withName(leaf(canonical));
+      }
+      fields.add(builder.build());
+    }
+    return Types.StructType.of(fields);
+  }
+
+  /** Drops ignored columns (canonical paths, any depth); an empty struct is dropped with them. */
+  static Schema dropIgnored(Schema schema, Set<String> ignored) {
+    if (ignored.isEmpty()) {
+      return schema;
+    }
+    return new Schema(dropStruct(schema.asStruct(), "", ignored).fields());
+  }
+
+  private static Types.StructType dropStruct(
+      Types.StructType struct, String prefix, Set<String> ignored) {
+    List<Types.NestedField> fields = new ArrayList<>();
+    for (Types.NestedField field : struct.fields()) {
+      String path = prefix + field.name();
+      if (ignored.contains(path)) {
+        continue;
+      }
+      if (field.type().isStructType()) {
+        Types.StructType child = dropStruct(field.type().asStructType(), path + ".", ignored);
+        if (child.fields().isEmpty()) {
+          continue;
+        }
+        fields.add(Types.NestedField.from(field).ofType(child).build());
+        continue;
+      }
+      fields.add(field);
+    }
+    return Types.StructType.of(fields);
+  }
+
+  private static String leaf(String path) {
+    return path.substring(path.lastIndexOf('.') + 1);
   }
 
   /**

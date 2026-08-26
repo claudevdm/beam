@@ -25,6 +25,7 @@ import static org.apache.beam.sdk.values.TypeDescriptors.strings;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import com.google.api.services.storage.model.StorageObject;
@@ -82,6 +83,7 @@ import org.apache.iceberg.DataFile;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.rest.RESTCatalog;
@@ -500,17 +502,27 @@ public class AddFilesIT {
   }
 
   /**
-   * Schema evolution against the live catalog: a narrow pre-existing table and files that add a
-   * column. Everything must register with stats for the added column and read back.
+   * Schema evolution against the live catalog: a narrow pre-existing table, files that add a
+   * column, and files that carry an alias for an existing column. Everything must register with
+   * stats and read back through the aliased name mapping.
    */
   @Test
   public void testBatchParquetImportWithSchemaEvolution() throws IOException {
     Schema narrow = Schema.builder().addInt64Field("id").addStringField("name").build();
     catalog.createTable(destTableId, beamSchemaToIcebergSchema(narrow));
 
+    Schema aliasedSchema =
+        Schema.builder().addInt64Field("id").addStringField("nm").addInt32Field("age").build();
+    List<Row> aliasedRows =
+        IntStream.range(100, 120)
+            .mapToObj(
+                i -> Row.withSchema(aliasedSchema).addValues((long) i, "name_" + i, i + 30).build())
+            .collect(Collectors.toList());
+
     String parquetDir = format("%s/%s/", WAREHOUSE, dirName);
     String tempDir = format("%s/%s-tmp/", WAREHOUSE, dirName);
     writeParquet(TEST_ROWS, ROW_SCHEMA, parquetDir + "plain/", tempDir + "plain/");
+    writeParquet(aliasedRows, aliasedSchema, parquetDir + "aliased/", tempDir + "aliased/");
 
     GcsUtil gcsUtil = TestPipeline.testingPipelineOptions().as(GcsOptions.class).getGcsUtil();
     List<String> writtenFilePaths =
@@ -519,11 +531,12 @@ public class AddFilesIT {
             .stream()
             .map(o -> format("gs://%s/%s", o.getBucket(), o.getName()))
             .collect(Collectors.toList());
-    assertEquals(20, writtenFilePaths.size());
+    assertEquals(40, writtenFilePaths.size());
 
     SchemaEvolutionConfig evolution =
         SchemaEvolutionConfig.builder()
             .setOptions(Arrays.asList(SchemaEvolutionOption.ALLOW_FIELD_ADDITION))
+            .withColumnAliases(ImmutableMap.of("nm", "name"))
             .build();
     Pipeline p = Pipeline.create();
     PCollectionRowTuple tuple =
@@ -545,6 +558,7 @@ public class AddFilesIT {
     Table destTable = catalog.loadTable(destTableId);
     org.apache.iceberg.types.Types.NestedField age = destTable.schema().findField("age");
     assertNotNull("column added by the pre-pass", age);
+    assertNull("alias never becomes a column", destTable.schema().findField("nm"));
     assertTrue(checkTableHasRegisteredParquetFiles(writtenFilePaths));
     int nameId = destTable.schema().findField("name").fieldId();
     for (org.apache.iceberg.FileScanTask task :
@@ -558,7 +572,12 @@ public class AddFilesIT {
           Long.valueOf(0),
           task.file().nullValueCounts().get(age.fieldId()));
     }
-    // every row reads back
+    org.apache.iceberg.mapping.NameMapping mapping =
+        org.apache.iceberg.mapping.NameMappingParser.fromJson(
+            destTable.properties().get(TableProperties.DEFAULT_NAME_MAPPING));
+    assertEquals(nameId, mapping.find("nm").id().intValue());
+
+    // every row reads back with its name, aliased files included
     List<Row> expected = new ArrayList<>();
     Schema wide =
         Schema.builder()
@@ -570,6 +589,12 @@ public class AddFilesIT {
       expected.add(
           Row.withSchema(wide)
               .addValues(row.getInt64("id"), row.getString("name"), row.getInt32("age"))
+              .build());
+    }
+    for (Row row : aliasedRows) {
+      expected.add(
+          Row.withSchema(wide)
+              .addValues(row.getInt64("id"), row.getString("nm"), row.getInt32("age"))
               .build());
     }
     Pipeline s = Pipeline.create();

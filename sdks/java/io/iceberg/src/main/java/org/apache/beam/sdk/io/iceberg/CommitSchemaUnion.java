@@ -36,6 +36,7 @@ import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.mapping.NameMapping;
+import org.apache.iceberg.mapping.NameMappingParser;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
@@ -156,6 +157,15 @@ final class CommitSchemaUnion {
     } catch (NoSuchTableException e) {
       return create(catalog, tableId, schemas, config, handling, creation, committer);
     }
+    for (String ignored : config.getIgnoredColumns()) {
+      if (table.schema().findField(ignored) != null) {
+        LOG.warn(
+            "Ignored column '{}' already exists in {}; it stays readable and keeps getting stats."
+                + " Ignoring only prevents adding a column.",
+            ignored,
+            tableId);
+      }
+    }
     List<Incompatible> incompatible = new ArrayList<>();
     List<Accepted> accepted = new ArrayList<>();
     long acceptedFiles = 0;
@@ -188,7 +198,7 @@ final class CommitSchemaUnion {
     if (staged) {
       relaxNewRequiredFields(txn, table.schema(), config);
     }
-    staged |= stageNameMapping(txn);
+    staged |= stageNameMapping(txn, config);
 
     if (!incompatible.isEmpty()) {
       reportIncompatible(tableId, incompatible, handling, "no schema change was committed");
@@ -257,7 +267,7 @@ final class CommitSchemaUnion {
     if (!incompatible.isEmpty()) {
       reportIncompatible(tableId, incompatible, handling, "no table was created");
     }
-    stageNameMapping(txn);
+    stageNameMapping(txn, config);
     committer.commit(txn);
     Table table = catalog.loadTable(tableId);
     LOG.info(
@@ -401,18 +411,31 @@ final class CommitSchemaUnion {
     update.commit();
   }
 
-  /** Regenerates the name mapping when absent, malformed or not covering the staged schema. */
-  private static boolean stageNameMapping(Transaction txn) {
+  /**
+   * Regenerates the name mapping when absent, malformed or not covering the staged schema, and adds
+   * the configured aliases. A missing alias alone is reason enough to commit: without it, aliased
+   * files are unreadable.
+   */
+  private static boolean stageNameMapping(Transaction txn, SchemaEvolutionConfig config) {
     Schema schema = txn.table().schema();
+    Map<String, String> aliases = config.getColumnAliases();
     @Nullable
     NameMapping existing =
         NameMappingUtils.parseOrNull(
             txn.table().properties().get(TableProperties.DEFAULT_NAME_MAPPING));
+    NameMapping base;
     if (existing != null && NameMappingUtils.covers(existing, schema.asStruct())) {
-      return false;
+      if (NameMappingUtils.hasAliases(existing, schema, aliases)) {
+        return false;
+      }
+      base = existing;
+    } else {
+      base = NameMappingParser.fromJson(NameMappingUtils.regenerate(schema, existing));
     }
-    String regenerated = NameMappingUtils.regenerate(schema, existing);
-    txn.updateProperties().set(TableProperties.DEFAULT_NAME_MAPPING, regenerated).commit();
+    NameMapping withAliases = NameMappingUtils.withAliases(base, schema, aliases);
+    txn.updateProperties()
+        .set(TableProperties.DEFAULT_NAME_MAPPING, NameMappingParser.toJson(withAliases))
+        .commit();
     return true;
   }
 
