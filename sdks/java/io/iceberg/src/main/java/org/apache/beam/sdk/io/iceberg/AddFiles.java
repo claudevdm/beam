@@ -39,6 +39,7 @@ import java.util.concurrent.Callable;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.coders.RowCoder;
 import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.metrics.Counter;
@@ -49,6 +50,7 @@ import org.apache.beam.sdk.state.StateSpec;
 import org.apache.beam.sdk.state.StateSpecs;
 import org.apache.beam.sdk.state.ValueState;
 import org.apache.beam.sdk.transforms.Combine;
+import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.GroupIntoBatches;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -120,7 +122,8 @@ import org.slf4j.LoggerFactory;
  * and committed as snapshots.
  *
  * <p>Outputs: {@code snapshots} (one row per commit), {@code errors} (one row per file that could
- * not be registered: {@code file}, {@code error}).
+ * not be registered: {@code file}, {@code error}), and {@code dry_run_report} when a dry run is
+ * configured.
  *
  * <p><b>Schema evolution.</b> With a {@link SchemaEvolutionConfig} whose options are set, a
  * pre-pass reads every Parquet footer, classifies the change each distinct file schema needs on the
@@ -150,6 +153,9 @@ import org.slf4j.LoggerFactory;
 public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTuple> {
   static final String OUTPUT_TAG = "snapshots";
   static final String ERROR_TAG = "errors";
+  /** Only present with {@link SchemaEvolutionConfig#getDryRun()}. */
+  static final String DRY_RUN_TAG = "dry_run_report";
+
   private static final Duration DEFAULT_TRIGGER_INTERVAL = Duration.standardMinutes(10);
   private static final Counter numManifestFilesAdded =
       counter(AddFiles.class, "numManifestFilesAdded");
@@ -246,6 +252,9 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
           "AddFiles configured to build partition metadata after the prefix: '{}'", locationPrefix);
     }
 
+    if (evolution.isEnabled() && evolution.getDryRun()) {
+      return dryRun(input);
+    }
     PCollection<String> paths = input;
     if (evolution.isEnabled()) {
       paths = gateOnSchemaCommit(input);
@@ -311,33 +320,75 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
   }
 
   /**
-   * Holds every path until its window's schema commit has landed. In batch the window is the global
-   * window, one commit for the whole input. In streaming, paths are stamped to processing time and
-   * windowed by the trigger interval, one commit per window; the gate adds at most one interval of
-   * latency. Stamping forward makes every element on time, so the zero-lateness window (which
-   * Wait.on requires to be explicit) cannot drop anything.
+   * Batch input stays in the global window. Streaming paths are stamped to processing time and
+   * windowed by the trigger interval; stamping forward makes every element on time, so the
+   * zero-lateness window (which Wait.on requires to be explicit) cannot drop anything.
+   */
+  private PCollection<String> prePassWindows(PCollection<String> input) {
+    if (!input.isBounded().equals(UNBOUNDED)) {
+      return input;
+    }
+    return input
+        .apply("StampToProcessingTime", ParDo.of(new StampToProcessingTime()))
+        .apply(
+            "PrePassWindow",
+            Window.<String>into(FixedWindows.of(checkStateNotNull(intervalTrigger)))
+                .withAllowedLateness(Duration.ZERO));
+  }
+
+  private PCollection<List<CollectDistinctSchemas.SchemaGroup>> distinctSchemas(
+      PCollection<String> windowed) {
+    return windowed
+        .apply("ReadFooterSchema", ParDo.of(new ReadFooterSchema(evolution)))
+        .setCoder(CollectDistinctSchemas.groupCoder())
+        .apply(
+            "CollectDistinctSchemas",
+            Combine.globally(new CollectDistinctSchemas()).withoutDefaults());
+  }
+
+  /** Reports what the pre-pass would do; nothing is committed or registered. */
+  private PCollectionRowTuple dryRun(PCollection<String> input) {
+    boolean bounded = !input.isBounded().equals(UNBOUNDED);
+    PCollection<Row> report =
+        distinctSchemas(prePassWindows(input))
+            .apply(
+                "DryRunReport",
+                ParDo.of(
+                    new DryRunReport(
+                        catalogConfig,
+                        tableIdentifier,
+                        evolution,
+                        evolution.incompatibleSchemaHandling(bounded))))
+            .setRowSchema(DryRunReport.REPORT_SCHEMA);
+    if (!bounded) {
+      report = report.apply("RewindowReport", Window.into(new GlobalWindows()));
+    }
+    PCollection<Row> noSnapshots =
+        input
+            .getPipeline()
+            .apply("NoSnapshots", Create.empty(RowCoder.of(SnapshotInfo.getSchema())))
+            .setRowSchema(SnapshotInfo.getSchema());
+    PCollection<Row> noErrors =
+        input
+            .getPipeline()
+            .apply("NoErrors", Create.empty(RowCoder.of(ERROR_SCHEMA)))
+            .setRowSchema(ERROR_SCHEMA);
+    return PCollectionRowTuple.of(OUTPUT_TAG, noSnapshots)
+        .and(ERROR_TAG, noErrors)
+        .and(DRY_RUN_TAG, report);
+  }
+
+  /**
+   * Holds every path until its window's schema commit has landed: one commit for the whole input in
+   * batch, one per window in streaming, at most one trigger interval of added latency.
    */
   private PCollection<String> gateOnSchemaCommit(PCollection<String> input) {
     boolean bounded = !input.isBounded().equals(UNBOUNDED);
-    PCollection<String> windowed = input;
-    if (!bounded) {
-      windowed =
-          input
-              .apply("StampToProcessingTime", ParDo.of(new StampToProcessingTime()))
-              .apply(
-                  "PrePassWindow",
-                  Window.<String>into(FixedWindows.of(checkStateNotNull(intervalTrigger)))
-                      .withAllowedLateness(Duration.ZERO));
-    }
+    PCollection<String> windowed = prePassWindows(input);
     CommitSchemaUnion.TableCreation creation =
         new CommitSchemaUnion.TableCreation(partitionFields, sortFields, tableProps);
     PCollection<Long> signal =
-        windowed
-            .apply("ReadFooterSchema", ParDo.of(new ReadFooterSchema(evolution)))
-            .setCoder(CollectDistinctSchemas.groupCoder())
-            .apply(
-                "CollectDistinctSchemas",
-                Combine.globally(new CollectDistinctSchemas()).withoutDefaults())
+        distinctSchemas(windowed)
             .apply(
                 "CommitSchemaOnce",
                 ParDo.of(

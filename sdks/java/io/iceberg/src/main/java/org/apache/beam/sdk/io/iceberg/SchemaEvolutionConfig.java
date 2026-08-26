@@ -41,6 +41,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  *     .withColumnAliases(Map.of("amt", "amount"))          // file name -> table name
  *     .setIgnoredColumns(List.of("debug_payload"))         // never added
  *     .setIncompatibleSchemaHandling(IncompatibleSchemaHandling.ROUTE_TO_ERRORS)
+ *     .setDryRun(false)
  *     .build();
  * }</pre>
  *
@@ -65,6 +66,9 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * decides whether that fails the pipeline before any schema commit (the batch default) or skips the
  * schema so its files reach the error output (the streaming default). Files whose footer cannot be
  * read or converted always go to the error output and never fail the pipeline.
+ *
+ * <p><b>Dry run.</b> Reports what a real run would do, per distinct file schema, on the {@code
+ * dry_run_report} output; nothing is committed or registered.
  */
 @AutoValue
 public abstract class SchemaEvolutionConfig implements Serializable {
@@ -99,6 +103,12 @@ public abstract class SchemaEvolutionConfig implements Serializable {
 
   /** Column paths dropped from every file schema, so never added to the table. */
   public abstract Set<String> getIgnoredColumns();
+
+  /**
+   * Report what the pre-pass would do on the {@code dry_run_report} output (one row per distinct
+   * file schema plus a summary row per window); commit and register nothing.
+   */
+  public abstract boolean getDryRun();
 
   /**
    * Unset resolves by mode: {@code FAIL_PIPELINE} in batch, {@code ROUTE_TO_ERRORS} in streaming.
@@ -136,7 +146,8 @@ public abstract class SchemaEvolutionConfig implements Serializable {
         .setOptions(Collections.emptySet())
         .setRequiredColumns(Collections.emptySet())
         .setColumnAliases(Collections.emptyMap())
-        .setIgnoredColumns(Collections.emptySet());
+        .setIgnoredColumns(Collections.emptySet())
+        .setDryRun(false);
   }
 
   /**
@@ -203,6 +214,8 @@ public abstract class SchemaEvolutionConfig implements Serializable {
 
     public abstract Builder setIncompatibleSchemaHandling(
         @Nullable IncompatibleSchemaHandling handling);
+
+    public abstract Builder setDryRun(boolean dryRun);
 
     abstract Builder setColumnAliases(Map<String, String> aliases);
 

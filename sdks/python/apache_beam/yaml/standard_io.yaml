@@ -613,6 +613,7 @@
         incompatible_schema_handling: 'incompatible_schema_handling'
         column_aliases: 'column_aliases'
         ignored_columns: 'ignored_columns'
+        dry_run: 'dry_run'
         error_handling: 'error_handling'
     underlying_provider:
       type: beamJar
