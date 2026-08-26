@@ -67,6 +67,16 @@ final class FileSchemas {
   }
 
   /**
+   * This one file's schema in table terms: convert, then tighten using its own footer. Uses the
+   * file's own null evidence, not its group's: a file that proves a column null-free registers even
+   * when other files sharing its schema could not prove it.
+   */
+  static Schema effective(ParquetMetadata footer) {
+    Schema converted = ParquetSchemaUtil.convert(footer.getFileMetaData().getSchema());
+    return tighten(converted, footer);
+  }
+
+  /**
    * Marks a declared-optional column required when every row group has a null count of zero for it,
    * so the file does not request a relaxation it does not need; an absent count is not proof. A
    * struct is null-free when any leaf under it is (a null struct nulls all its leaves). Nothing
