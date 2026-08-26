@@ -57,7 +57,12 @@ dependencies {
   testImplementation library.java.bigdataoss_gcsio
   testImplementation library.java.bigdataoss_util_hadoop
   testImplementation "org.apache.parquet:parquet-avro:$parquet_version"
+  testImplementation "org.apache.parquet:parquet-hadoop:$parquet_version"
+  testImplementation "org.apache.parquet:parquet-column:$parquet_version"
+  testImplementation library.java.google_code_gson
   testImplementation "org.apache.iceberg:iceberg-data:$iceberg_version"
+  testImplementation "org.apache.iceberg:iceberg-parquet:$iceberg_version"
+  testImplementation "org.apache.iceberg:iceberg-core:$iceberg_version"
   testImplementation project(path: ":sdks:java:core", configuration: "shadowTest")
   testImplementation library.java.junit
   testImplementation library.java.hamcrest
@@ -130,5 +135,20 @@ hadoopVersions.each {kv ->
 tasks.register(
   "IcebergPerformanceTest", IoPerformanceTestUtilities.IoPerformanceTest, project, 'iceberg', 'IcebergIOLT',
   ['configuration':'large','project':'apache-beam-testing', 'artifactBucket':'io-performance-temp']
+    + System.properties
+)
+
+// Local only (HadoopCatalog in a temp folder, Direct runner); -Dseeds, -DseedStart, -Dseed.
+tasks.register(
+  "AddFilesFuzz", IoPerformanceTestUtilities.IoPerformanceTest, project, 'iceberg', 'AddFilesFuzzTest',
+  ['seeds':'20','project':'apache-beam-testing', 'artifactBucket':'io-performance-temp'] + System.properties
+)
+
+// -DtestConfig selects the scale (direct-1k, coverage, dataflow-10k, dataflow-100k, dataflow-1m
+// and the -addfiles variants); Dataflow configs need -Dproject, -Dregion, -DartifactBucket and,
+// for -addfiles, a BigLake catalog (-DbiglakeWarehouse). See AddFilesPrePassLT.
+tasks.register(
+  "AddFilesPrePassPerformanceTest", IoPerformanceTestUtilities.IoPerformanceTest, project, 'iceberg', 'AddFilesPrePassLT',
+  ['testConfig':'direct-1k','project':'apache-beam-testing', 'region':'us-central1', 'artifactBucket':'io-performance-temp']
     + System.properties
 )
