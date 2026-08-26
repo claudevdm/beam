@@ -26,6 +26,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasEntry;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
@@ -1072,6 +1073,103 @@ public class AddFilesTest {
     Table table = catalog.loadTable(tableId);
     assertNull(table.schema().findField("email"));
     assertEquals(1, Iterables.size(table.newScan().planFiles()));
+  }
+
+  @Test
+  public void testDryRunReportsWithoutCommittingOrRegistering() throws Exception {
+    catalog.createTable(tableId, icebergSchema);
+    String before =
+        ((org.apache.iceberg.BaseTable) catalog.loadTable(tableId))
+            .operations()
+            .current()
+            .metadataFileLocation();
+    String covered = root + "covered.parquet";
+    DataWriter<Record> writer = createWriter(covered);
+    writer.write(record(1, "a", 1));
+    writer.close();
+    String wide = writeWithSchema("wide.parquet", WIDER, widerRecord(WIDER));
+    Schema conflicting =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.required(2, "name", Types.IntegerType.get()),
+            Types.NestedField.required(3, "age", Types.IntegerType.get()));
+    Record bad = GenericRecord.create(conflicting);
+    bad.setField("id", 1);
+    bad.setField("name", 5);
+    bad.setField("age", 1);
+    String conflict = writeWithSchema("conflict.parquet", conflicting, bad);
+
+    SchemaEvolutionConfig config =
+        SchemaEvolutionConfig.builder()
+            .setOptions(Arrays.asList(SchemaEvolutionOption.ALLOW_FIELD_ADDITION))
+            .setDryRun(true)
+            .build();
+    PCollectionRowTuple output =
+        pipeline.apply("Create Input", Create.of(covered, wide, conflict)).apply(addFiles(config));
+    PAssert.that(output.get("errors")).empty();
+    PAssert.that(output.get("snapshots")).empty();
+    PAssert.that(output.get(AddFiles.DRY_RUN_TAG))
+        .satisfies(
+            rows -> {
+              int schemaRows = 0;
+              Row summary = null;
+              boolean sawAddition = false;
+              boolean sawConflict = false;
+              for (Row row : rows) {
+                if (row.getBoolean("summary")) {
+                  summary = row;
+                  continue;
+                }
+                schemaRows++;
+                java.util.Collection<String> changes = row.getArray("changes");
+                if (changes.contains("add optional email string")) {
+                  sawAddition = row.getBoolean("allowed");
+                }
+                if (!row.getBoolean("allowed")) {
+                  sawConflict = row.getString("reason").contains("conflicts");
+                }
+              }
+              assertEquals(3, schemaRows);
+              assertTrue(sawAddition);
+              assertTrue(sawConflict);
+              assertNotNull(summary);
+              assertEquals(Long.valueOf(3), summary.getInt64("num_files"));
+              assertThat(summary.getString("reason"), containsString("would fail"));
+              return null;
+            });
+    assertEquals(0, countTransforms(pipeline, "ConvertToDataFiles"));
+    pipeline.run().waitUntilFinish();
+    Table table = catalog.loadTable(tableId);
+    assertEquals(0, Iterables.size(table.snapshots()));
+    assertEquals(
+        before,
+        ((org.apache.iceberg.BaseTable) table).operations().current().metadataFileLocation());
+  }
+
+  @Test
+  public void testDryRunAgainstMissingTableReportsCreation() throws Exception {
+    String wide = writeWithSchema("wide.parquet", WIDER, widerRecord(WIDER));
+    SchemaEvolutionConfig config =
+        SchemaEvolutionConfig.builder()
+            .setOptions(Arrays.asList(SchemaEvolutionOption.ALLOW_FIELD_ADDITION))
+            .setDryRun(true)
+            .build();
+    PCollectionRowTuple output =
+        pipeline.apply("Create Input", Create.of(wide)).apply(addFiles(config));
+    PAssert.that(output.get(AddFiles.DRY_RUN_TAG))
+        .satisfies(
+            rows -> {
+              for (Row row : rows) {
+                assertTrue(row.getBoolean("would_create_table"));
+                if (!row.getBoolean("summary")) {
+                  assertTrue(
+                      row.getArray("changes").toString().contains("create optional email string"));
+                }
+              }
+              return null;
+            });
+    pipeline.run().waitUntilFinish();
+    assertFalse(catalog.tableExists(tableId));
   }
 
   @Test

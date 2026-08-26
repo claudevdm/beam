@@ -148,6 +148,13 @@ public class AddFilesSchemaTransformProvider extends TypedSchemaTransformProvide
     public abstract @Nullable List<String> getIgnoredColumns();
 
     @SchemaFieldDescription(
+        "When true, nothing is committed or registered: the transform reads the files' schemas"
+            + " and emits a dry_run_report output with one row per distinct file schema (files,"
+            + " changes a real run would make, whether they are allowed and why not) plus a"
+            + " summary row. The output only exists when this is set.")
+    public abstract @Nullable Boolean getDryRun();
+
+    @SchemaFieldDescription(
         "What to do when a file's schema is incompatible with the table (needs a change that"
             + " is not allowed, or conflicts with the table or another file): FAIL_PIPELINE"
             + " fails the pipeline before any schema change is committed; ROUTE_TO_ERRORS skips"
@@ -190,6 +197,8 @@ public class AddFilesSchemaTransformProvider extends TypedSchemaTransformProvide
 
       public abstract Builder setIgnoredColumns(List<String> columns);
 
+      public abstract Builder setDryRun(Boolean dryRun);
+
       public abstract Configuration build();
     }
 
@@ -200,19 +209,21 @@ public class AddFilesSchemaTransformProvider extends TypedSchemaTransformProvide
       String handlingName = getIncompatibleSchemaHandling();
       Map<String, String> aliases = getColumnAliases();
       List<String> ignored = getIgnoredColumns();
+      boolean dryRun = Boolean.TRUE.equals(getDryRun());
       boolean nothingSet =
           (optionNames == null || optionNames.isEmpty())
               && (pins == null || pins.isEmpty())
               && handlingName == null
               && (aliases == null || aliases.isEmpty())
-              && (ignored == null || ignored.isEmpty());
+              && (ignored == null || ignored.isEmpty())
+              && !dryRun;
       if (nothingSet) {
         return null;
       }
       Preconditions.checkArgument(
           optionNames != null && !optionNames.isEmpty(),
-          "required_columns, column_aliases, ignored_columns and incompatible_schema_handling"
-              + " need at least one schema_evolution_options entry");
+          "required_columns, column_aliases, ignored_columns, incompatible_schema_handling and"
+              + " dry_run need at least one schema_evolution_options entry");
       List<SchemaEvolutionOption> options = new java.util.ArrayList<>();
       for (String name : checkStateNotNull(optionNames)) {
         options.add(parseEnum(SchemaEvolutionOption.class, name, "schema_evolution_options"));
@@ -227,6 +238,7 @@ public class AddFilesSchemaTransformProvider extends TypedSchemaTransformProvide
       if (ignored != null) {
         builder = builder.setIgnoredColumns(ignored);
       }
+      builder = builder.setDryRun(dryRun);
       if (handlingName != null) {
         builder =
             builder.setIncompatibleSchemaHandling(
@@ -300,6 +312,9 @@ public class AddFilesSchemaTransformProvider extends TypedSchemaTransformProvide
       ErrorHandling errorHandling = configuration.getErrorHandling();
       if (errorHandling != null) {
         output = output.and(errorHandling.getOutput(), result.get(ERROR_TAG));
+      }
+      if (Boolean.TRUE.equals(configuration.getDryRun())) {
+        output = output.and(AddFiles.DRY_RUN_TAG, result.get(AddFiles.DRY_RUN_TAG));
       }
       return output;
     }
