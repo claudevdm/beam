@@ -21,7 +21,9 @@ import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Pr
 
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.apache.beam.sdk.io.iceberg.SchemaEvolutionConfig.IncompatibleSchemaHandling;
 import org.apache.beam.sdk.util.BackOff;
@@ -36,7 +38,9 @@ import org.apache.iceberg.Transaction;
 import org.apache.iceberg.UpdateSchema;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
+import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.mapping.NameMapping;
 import org.apache.iceberg.types.Type;
@@ -63,6 +67,25 @@ final class CommitSchemaUnion {
   private static final Logger LOG = LoggerFactory.getLogger(CommitSchemaUnion.class);
 
   static final int MAX_ATTEMPTS = 5;
+
+  /** Returned when the table does not exist and there is no schema to create it from. */
+  static final long NO_TABLE = -1L;
+
+  /** How to create the table when it does not exist: from the union of the window's schemas. */
+  static final class TableCreation implements Serializable {
+    final @Nullable List<String> partitionFields;
+    final @Nullable List<String> sortFields;
+    final @Nullable Map<String, String> properties;
+
+    TableCreation(
+        @Nullable List<String> partitionFields,
+        @Nullable List<String> sortFields,
+        @Nullable Map<String, String> properties) {
+      this.partitionFields = partitionFields;
+      this.sortFields = sortFields;
+      this.properties = properties;
+    }
+  }
 
   /** Injectable so tests can exercise the commit retry path. */
   interface Committer extends Serializable {
@@ -111,7 +134,8 @@ final class CommitSchemaUnion {
   private CommitSchemaUnion() {}
 
   /**
-   * Applies the schemas and returns the table's schema id after the call.
+   * Applies the schemas and returns the table's schema id after the call, or {@link #NO_TABLE} when
+   * the table is missing and there is no schema to create it from.
    *
    * @param schemas the window's distinct schema groups, most common first
    */
@@ -121,6 +145,7 @@ final class CommitSchemaUnion {
       List<CollectDistinctSchemas.SchemaGroup> schemas,
       SchemaEvolutionConfig config,
       IncompatibleSchemaHandling handling,
+      TableCreation creation,
       Committer committer) {
     // The catalog is already under contention when a retry fires; back off (jittered by
     // FluentBackoff) instead of piling on. Iceberg's own metadata retries (commit.retry.*)
@@ -133,8 +158,9 @@ final class CommitSchemaUnion {
             .backoff();
     for (int attempt = 1; ; attempt++) {
       try {
-        return commitOnce(catalog, tableId, schemas, config, handling, committer);
-      } catch (CommitFailedException e) {
+        return commitOnce(catalog, tableId, schemas, config, handling, creation, committer);
+      } catch (CommitFailedException | AlreadyExistsException e) {
+        // a concurrent commit, or a create race: the next attempt loads the fresh state
         try {
           if (!BackOffUtils.next(Sleeper.DEFAULT, backoff)) {
             throw e;
@@ -159,8 +185,14 @@ final class CommitSchemaUnion {
       List<CollectDistinctSchemas.SchemaGroup> schemas,
       SchemaEvolutionConfig config,
       IncompatibleSchemaHandling handling,
+      TableCreation creation,
       Committer committer) {
-    Table table = catalog.loadTable(tableId);
+    Table table;
+    try {
+      table = catalog.loadTable(tableId);
+    } catch (NoSuchTableException e) {
+      return create(catalog, tableId, schemas, handling, creation, committer);
+    }
     // Every transaction below must share this snapshot: classification, the fold and the replay
     // all reason about the same table state (newTransactionOn enforces it).
     Schema base = table.schema();
@@ -183,7 +215,15 @@ final class CommitSchemaUnion {
       accepted.add(new Accepted(fileSchema, group.getSchemaJson(), group.getFiles(), delta));
     }
 
-    Transaction scratch = stageAll(table, base, tableId, accepted, incompatible);
+    Transaction scratch;
+    while (true) {
+      scratch = newTransactionOn(table, base, tableId);
+      Accepted failed = stageAll(scratch, accepted, incompatible);
+      if (failed == null) {
+        break;
+      }
+      accepted.remove(failed);
+    }
     boolean folded = !accepted.isEmpty();
     if (folded) {
       relaxNewRequiredFields(scratch, base);
@@ -209,28 +249,7 @@ final class CommitSchemaUnion {
     staged |= stageNameMapping(txn);
 
     if (!incompatible.isEmpty()) {
-      long files = 0;
-      for (Incompatible item : incompatible) {
-        files += item.files;
-      }
-      if (handling == IncompatibleSchemaHandling.FAIL_PIPELINE) {
-        throw new IncompatibleSchemaException(
-            "Incompatible schemas for "
-                + tableId
-                + " ("
-                + incompatible.size()
-                + " schema(s), "
-                + files
-                + " file(s)); no schema change was committed:\n  "
-                + joinLines(incompatible));
-      }
-      LOG.warn(
-          "Skipping {} incompatible schema(s) ({} file(s)) for {}; their files will be routed to"
-              + " the error output:\n  {}",
-          incompatible.size(),
-          files,
-          tableId,
-          joinLines(incompatible));
+      reportIncompatible(tableId, incompatible, handling, "no schema change was committed");
     }
 
     if (!staged) {
@@ -255,13 +274,148 @@ final class CommitSchemaUnion {
     return table.schema().schemaId();
   }
 
+  /**
+   * Creates the table from the union of the window's schemas, with every column optional at every
+   * level so that one lucky file cannot impose required columns on the table. Pins do not shape the
+   * created schema; they are enforced per file at registration.
+   */
+  private static long create(
+      Catalog catalog,
+      TableIdentifier tableId,
+      List<CollectDistinctSchemas.SchemaGroup> schemas,
+      IncompatibleSchemaHandling handling,
+      TableCreation creation,
+      Committer committer) {
+    if (schemas.isEmpty()) {
+      LOG.info("Table {} does not exist and no file schema was read; not creating it", tableId);
+      return NO_TABLE;
+    }
+    // Null evidence is irrelevant here: creation relaxes every column anyway.
+    Schema seed = SchemaParser.fromJson(schemas.get(0).getSchemaJson());
+    List<Accepted> rest = new ArrayList<>();
+    for (CollectDistinctSchemas.SchemaGroup group : schemas.subList(1, schemas.size())) {
+      Schema fileSchema = SchemaParser.fromJson(group.getSchemaJson());
+      rest.add(new Accepted(fileSchema, group.getSchemaJson(), group.getFiles(), null));
+    }
+    // The union of the schemas is folded on a scratch create transaction that is never
+    // committed, then the real table is built from the folded result directly: it is born with
+    // one schema version, and partition and sort fields resolve against the union rather than
+    // the seed alone.
+    List<Incompatible> incompatible = new ArrayList<>();
+    Schema merged;
+    while (true) {
+      Transaction scratch = catalog.buildTable(tableId, seed).createTransaction();
+      Accepted failed = stageAll(scratch, rest, incompatible);
+      if (failed == null) {
+        merged = scratch.table().schema();
+        break;
+      }
+      rest.remove(failed);
+    }
+    if (!incompatible.isEmpty()) {
+      reportIncompatible(tableId, incompatible, handling, "no table was created");
+    }
+    Schema created = relaxAll(merged);
+    Map<String, String> properties =
+        creation.properties == null ? new HashMap<>() : new HashMap<>(creation.properties);
+    Transaction txn =
+        catalog
+            .buildTable(tableId, created)
+            .withPartitionSpec(PartitionUtils.toPartitionSpec(creation.partitionFields, created))
+            .withSortOrder(SortOrderUtils.toSortOrder(creation.sortFields, created))
+            .withProperties(properties)
+            .createTransaction();
+    stageNameMapping(txn);
+    committer.commit(txn);
+    Table table = catalog.loadTable(tableId);
+    LOG.info(
+        "Created table {} from {} file schema(s), schema id {}",
+        tableId,
+        schemas.size() - incompatible.size(),
+        table.schema().schemaId());
+    return table.schema().schemaId();
+  }
+
+  /**
+   * Every field optional at every level, list elements and map values included; map key subtrees
+   * keep their declared shape (keys are required by definition). Pins do not shape new columns, and
+   * nothing depends on a created table's schema yet.
+   */
+  static Schema relaxAll(Schema schema) {
+    List<Types.NestedField> fields = new ArrayList<>();
+    for (Types.NestedField field : schema.asStruct().fields()) {
+      fields.add(relaxAll(field));
+    }
+    return new Schema(fields);
+  }
+
+  private static Types.NestedField relaxAll(Types.NestedField field) {
+    return Types.NestedField.from(field)
+        .ofType(relaxAllType(field.type()))
+        .isOptional(true)
+        .build();
+  }
+
+  private static Type relaxAllType(Type type) {
+    if (type.isStructType()) {
+      List<Types.NestedField> fields = new ArrayList<>();
+      for (Types.NestedField field : type.asStructType().fields()) {
+        fields.add(relaxAll(field));
+      }
+      return Types.StructType.of(fields);
+    }
+    if (type.isListType()) {
+      Types.ListType list = type.asListType();
+      return Types.ListType.ofOptional(list.elementId(), relaxAllType(list.elementType()));
+    }
+    if (type.isMapType()) {
+      Types.MapType map = type.asMapType();
+      return Types.MapType.ofOptional(
+          map.keyId(), map.valueId(), map.keyType(), relaxAllType(map.valueType()));
+    }
+    return type;
+  }
+
+  private static void reportIncompatible(
+      TableIdentifier tableId,
+      List<Incompatible> incompatible,
+      IncompatibleSchemaHandling handling,
+      String consequence) {
+    long files = 0;
+    for (Incompatible item : incompatible) {
+      files += item.files;
+    }
+    if (handling == IncompatibleSchemaHandling.FAIL_PIPELINE) {
+      throw new IncompatibleSchemaException(
+          "Incompatible schemas for "
+              + tableId
+              + " ("
+              + incompatible.size()
+              + " schema(s), "
+              + files
+              + " file(s)); "
+              + consequence
+              + ":\n  "
+              + joinLines(incompatible));
+    }
+    LOG.warn(
+        "Skipping {} incompatible schema(s) ({} file(s)) for {}; their files will be routed to"
+            + " the error output:\n  {}",
+        incompatible.size(),
+        files,
+        tableId,
+        joinLines(incompatible));
+  }
+
   private static final class Accepted {
     final Schema schema;
     final String json;
     final long files;
-    final SchemaDelta delta;
 
-    Accepted(Schema schema, String json, long files, SchemaDelta delta) {
+    /** Null on the create path: the seed table is empty, so there is nothing to relax. */
+    final @Nullable SchemaDelta delta;
+
+    Accepted(Schema schema, String json, long files, @Nullable SchemaDelta delta) {
       this.schema = schema;
       this.json = json;
       this.files = files;
@@ -270,42 +424,31 @@ final class CommitSchemaUnion {
   }
 
   /**
-   * Folds one union per accepted schema into a scratch transaction the caller must never commit;
-   * its intermediate schema versions exist only in memory. A schema can conflict with another
-   * schema's additions, which only surfaces while staging and poisons the transaction, so on a
-   * conflict the offender moves to {@code incompatible} and the transaction is rebuilt without it.
+   * Stages one union per accepted schema onto {@code txn}: a scratch transaction on the evolve path
+   * (its per-schema versions stay in memory; only the folded result is ever committed), the create
+   * transaction on the create path. A schema can conflict with another schema's additions, which
+   * only surfaces while staging and poisons the transaction, so on a conflict the offender is
+   * returned for the caller to drop and retry with a fresh transaction.
    */
-  private static Transaction stageAll(
-      Table table,
-      Schema base,
-      TableIdentifier tableId,
-      List<Accepted> accepted,
-      List<Incompatible> incompatible) {
-    while (true) {
-      Transaction txn = newTransactionOn(table, base, tableId);
-      Accepted failed = null;
-      for (Accepted item : accepted) {
-        // Both caught types carry staging conflicts: ValidationException from Schema
-        // construction at apply ("multiple fields for name"), IllegalArgumentException from
-        // SchemaUpdate preconditions ("Cannot change column type").
-        try {
-          stage(txn, item);
-        } catch (ValidationException | IllegalArgumentException e) {
-          failed = item;
-          incompatible.add(
-              new Incompatible(
-                  item.json,
-                  item.files,
-                  "conflicts with another file schema in the same window: "
-                      + AddFiles.errorMessage(e)));
-          break;
-        }
+  private static @Nullable Accepted stageAll(
+      Transaction txn, List<Accepted> accepted, List<Incompatible> incompatible) {
+    for (Accepted item : accepted) {
+      // Both caught types carry staging conflicts: ValidationException from Schema
+      // construction at apply ("multiple fields for name"), IllegalArgumentException from
+      // SchemaUpdate preconditions ("Cannot change column type").
+      try {
+        stage(txn, item);
+      } catch (ValidationException | IllegalArgumentException e) {
+        incompatible.add(
+            new Incompatible(
+                item.json,
+                item.files,
+                "conflicts with another file schema in the same window: "
+                    + AddFiles.errorMessage(e)));
+        return item;
       }
-      if (failed == null) {
-        return txn;
-      }
-      accepted.remove(failed);
     }
+    return null;
   }
 
   /**
@@ -325,8 +468,10 @@ final class CommitSchemaUnion {
 
   private static void stage(Transaction txn, Accepted item) {
     UpdateSchema update = txn.updateSchema().unionByNameWith(item.schema);
-    for (String path : item.delta.absentRequiredPaths()) {
-      update = update.makeColumnOptional(path);
+    if (item.delta != null) {
+      for (String path : item.delta.absentRequiredPaths()) {
+        update = update.makeColumnOptional(path);
+      }
     }
     update.commit();
   }
