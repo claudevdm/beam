@@ -224,6 +224,18 @@ public class ReadFooterSchemaTest {
   }
 
   @Test
+  public void testEmbeddedIdFileContributesNothing() throws IOException {
+    Record full = GenericRecord.create(FLAT_SCHEMA).copy("id", 1, "name", "a");
+    String withIds = writeWithEmbeddedIds("with_ids.parquet", FLAT_SCHEMA, full);
+    PAssert.that(run(withIds)).empty();
+    PipelineResult result = pipeline.run();
+    assertEquals(1L, counter(result, ReadFooterSchema.FILES_READ_COUNTER));
+    assertEquals(0L, counter(result, ReadFooterSchema.SCHEMAS_EMITTED_COUNTER));
+    assertEquals(0L, counter(result, ReadFooterSchema.FOOTER_READ_ERRORS_COUNTER));
+    assertEquals(1L, counter(result, ReadFooterSchema.EMBEDDED_IDS_COUNTER));
+  }
+
+  @Test
   public void testMixedBundleEmitsOnlyReadableSchemas() throws IOException {
     String flat = writeParquet("flat.parquet", FLAT_SCHEMA, record(FLAT_SCHEMA, "id", 1));
     String nested = writeParquet("nested.parquet", NESTED_SCHEMA, record(NESTED_SCHEMA, "id", 1L));
@@ -294,6 +306,13 @@ public class ReadFooterSchemaTest {
   }
 
   private String writeParquet(String name, Schema schema, Record... records) throws IOException {
+    return IdLessParquet.write(
+        new File(temporaryFolder.getRoot(), name).getAbsolutePath(), schema, records);
+  }
+
+  /** The Iceberg writer embeds the schema's field ids; only the skip test wants that. */
+  private String writeWithEmbeddedIds(String name, Schema schema, Record... records)
+      throws IOException {
     String file = new File(temporaryFolder.getRoot(), name).getAbsolutePath();
     DataWriter<Record> writer =
         Parquet.writeData(org.apache.iceberg.Files.localOutput(file))

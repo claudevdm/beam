@@ -762,9 +762,13 @@ public final class AddFilesPrePassLT extends IOLoadTestBase {
       }
       String result;
       try {
-        result =
-            FileSchemas.canonicalJson(
-                ParquetFooters.read(entry.path), SchemaEvolutionConfig.disabled());
+        org.apache.parquet.hadoop.metadata.ParquetMetadata footer = ParquetFooters.read(entry.path);
+        if (org.apache.iceberg.parquet.ParquetSchemaUtil.hasIds(
+            footer.getFileMetaData().getSchema())) {
+          // ReadFooterSchema skips embedded-id files; the oracle must match.
+          continue;
+        }
+        result = FileSchemas.canonicalJson(footer, SchemaEvolutionConfig.disabled());
       } catch (Exception e) {
         result =
             ERROR_PREFIX + e.getClass().getSimpleName() + ": " + stable(AddFiles.errorMessage(e));

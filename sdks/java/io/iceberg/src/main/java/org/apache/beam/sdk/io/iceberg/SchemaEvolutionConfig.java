@@ -67,6 +67,10 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * schema so its files reach the error output (the streaming default). Files whose footer cannot be
  * read or converted always go to the error output and never fail the pipeline.
  *
+ * <p><b>Iceberg-written files.</b> Files with embedded Iceberg field ids never drive schema
+ * evolution (the union cannot reproduce a foreign table's id assignment) and register only when
+ * their ids match the table's exactly; see {@link AddFiles}.
+ *
  * <p><b>Dry run.</b> Reports what a real run would do, per distinct file schema, on the {@code
  * dry_run_report} output; nothing is committed or registered.
  */

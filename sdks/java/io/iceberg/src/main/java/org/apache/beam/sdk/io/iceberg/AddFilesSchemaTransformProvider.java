@@ -124,7 +124,8 @@ public class AddFilesSchemaTransformProvider extends TypedSchemaTransformProvide
             + " With any option set, every Parquet file's footer is read and the allowed changes"
             + " are committed before files are registered, so stats cover every file. A file"
             + " needing a change that is not allowed is incompatible: see"
-            + " incompatible_schema_handling.")
+            + " incompatible_schema_handling. Files with embedded Iceberg field ids never drive"
+            + " evolution and register only when their ids match the table's exactly.")
     public abstract @Nullable List<String> getSchemaEvolutionOptions();
 
     @SchemaFieldDescription(

@@ -27,6 +27,7 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.iceberg.FileFormat;
+import org.apache.iceberg.parquet.ParquetSchemaUtil;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -36,7 +37,10 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Emits one {@link CollectDistinctSchemas.SchemaGroup} of one file per readable Parquet file: its
- * declared schema and its null-free columns. Unreadable or non-Parquet files contribute nothing.
+ * declared schema and its null-free columns. Unreadable or non-Parquet files contribute nothing,
+ * and neither do files with embedded Iceberg field ids: they register only on an exact id match
+ * (the embedded-id check in ConvertToDataFile), and the union cannot mint matching ids, so evolving
+ * the schema for them would grow it for files that get rejected anyway.
  */
 class ReadFooterSchema extends DoFn<String, CollectDistinctSchemas.SchemaGroup> {
   private static final Logger LOG = LoggerFactory.getLogger(ReadFooterSchema.class);
@@ -46,11 +50,14 @@ class ReadFooterSchema extends DoFn<String, CollectDistinctSchemas.SchemaGroup> 
   static final String FILES_READ_COUNTER = "numFilesRead";
   static final String SCHEMAS_EMITTED_COUNTER = "numSchemasEmitted";
   static final String FOOTER_READ_ERRORS_COUNTER = "numFooterReadErrors";
+  static final String EMBEDDED_IDS_COUNTER = "numEmbeddedIdFilesSkipped";
   private static final Counter numFilesRead = counter(ReadFooterSchema.class, FILES_READ_COUNTER);
   private static final Counter numSchemasEmitted =
       counter(ReadFooterSchema.class, SCHEMAS_EMITTED_COUNTER);
   private static final Counter numFooterReadErrors =
       counter(ReadFooterSchema.class, FOOTER_READ_ERRORS_COUNTER);
+  private static final Counter numEmbeddedIdFilesSkipped =
+      counter(ReadFooterSchema.class, EMBEDDED_IDS_COUNTER);
 
   private final SchemaEvolutionConfig config;
   private final int threadPoolSize;
@@ -71,6 +78,7 @@ class ReadFooterSchema extends DoFn<String, CollectDistinctSchemas.SchemaGroup> 
   private static class ReadResult {
     final CollectDistinctSchemas.@Nullable SchemaGroup schema;
     final boolean footerError;
+    final boolean embeddedIds;
     final Instant timestamp;
     final BoundedWindow window;
     final PaneInfo paneInfo;
@@ -78,11 +86,13 @@ class ReadFooterSchema extends DoFn<String, CollectDistinctSchemas.SchemaGroup> 
     ReadResult(
         CollectDistinctSchemas.@Nullable SchemaGroup schema,
         boolean footerError,
+        boolean embeddedIds,
         Instant timestamp,
         BoundedWindow window,
         PaneInfo paneInfo) {
       this.schema = schema;
       this.footerError = footerError;
+      this.embeddedIds = embeddedIds;
       this.timestamp = timestamp;
       this.window = window;
       this.paneInfo = paneInfo;
@@ -148,6 +158,9 @@ class ReadFooterSchema extends DoFn<String, CollectDistinctSchemas.SchemaGroup> 
     if (result.footerError) {
       numFooterReadErrors.inc();
     }
+    if (result.embeddedIds) {
+      numEmbeddedIdFilesSkipped.inc();
+    }
   }
 
   private Callable<ReadResult> createReadTask(
@@ -157,21 +170,24 @@ class ReadFooterSchema extends DoFn<String, CollectDistinctSchemas.SchemaGroup> 
       try {
         format = AddFiles.inferFormat(filePath);
       } catch (AddFiles.UnknownFormatException e) {
-        return new ReadResult(null, false, timestamp, window, paneInfo);
+        return new ReadResult(null, false, false, timestamp, window, paneInfo);
       }
       if (!format.equals(FileFormat.PARQUET)) {
-        return new ReadResult(null, false, timestamp, window, paneInfo);
+        return new ReadResult(null, false, false, timestamp, window, paneInfo);
       }
       try {
         ParquetMetadata footer = ParquetFooters.read(filePath);
+        if (ParquetSchemaUtil.hasIds(footer.getFileMetaData().getSchema())) {
+          return new ReadResult(null, false, true, timestamp, window, paneInfo);
+        }
         return new ReadResult(
-            FileSchemas.schemaGroup(footer, config), false, timestamp, window, paneInfo);
+            FileSchemas.schemaGroup(footer, config), false, false, timestamp, window, paneInfo);
       } catch (Exception e) {
         LOG.warn(
             "Could not read the footer of {}; the file will not contribute to schema inference: {}",
             filePath,
             AddFiles.errorMessage(e));
-        return new ReadResult(null, true, timestamp, window, paneInfo);
+        return new ReadResult(null, true, false, timestamp, window, paneInfo);
       }
     };
   }

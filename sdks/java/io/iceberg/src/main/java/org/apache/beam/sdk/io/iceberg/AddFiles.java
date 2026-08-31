@@ -105,6 +105,7 @@ import org.apache.iceberg.parquet.ParquetUtil;
 import org.apache.iceberg.transforms.Transform;
 import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.types.Type;
+import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
 import org.apache.parquet.hadoop.metadata.FileMetaData;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
@@ -149,6 +150,12 @@ import org.slf4j.LoggerFactory;
  * <p>Without options the table schema is never changed and files register as-is; columns the table
  * does not have get no stats and are not readable, and a nested column the table does not know can
  * make the table unreadable through Iceberg's reader.
+ *
+ * <p><b>Iceberg-written files.</b> A Parquet file with embedded Iceberg field ids registers only
+ * when those ids match the table's exactly (readers bind such files by id, names ignored);
+ * otherwise it is routed to {@code errors}. Such files never drive schema evolution. To migrate a
+ * whole Iceberg table, register its metadata ({@code Catalog.registerTable}) instead of
+ * re-registering its data files.
  */
 public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTuple> {
   static final String OUTPUT_TAG = "snapshots";
@@ -502,6 +509,12 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
     private static final String UNKNOWN_FORMAT_ERROR = "Could not determine the file's format";
     static final String UNKNOWN_PARTITION_ERROR = "Could not determine the file's partition: ";
     static final String UNREADABLE_SCHEMA_ERROR = "Could not read the file's schema: ";
+    static final String EMBEDDED_ID_ERROR =
+        "Iceberg field ids in the file do not match the table: ";
+    private static final String MIGRATE_HINT =
+        ". Iceberg-written files register safely only into their table of origin; to migrate a"
+            + " whole table, register its metadata (Catalog.registerTable) instead of"
+            + " re-registering its data files";
     static final String UNCOVERED_ERROR = "Table schema does not cover the file after refresh: ";
     static final String PINNED_COLUMN_ERROR = "Pinned required column ";
 
@@ -647,6 +660,12 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
           } catch (Exception e) {
             return errorResult(filePath, errorMessage(e), timestamp, window, paneInfo);
           }
+          @Nullable
+          String idMismatch =
+              embeddedIdMismatch(parquetFooter.getFileMetaData().getSchema(), table.schema());
+          if (idMismatch != null) {
+            return errorResult(filePath, idMismatch, timestamp, window, paneInfo);
+          }
           if (evolution.isEnabled()) {
             try {
               fileSchema = FileSchemas.effective(parquetFooter, evolution);
@@ -770,6 +789,59 @@ public class AddFiles extends PTransform<PCollection<String>, PCollectionRowTupl
         }
         if (nulls > 0) {
           return PINNED_COLUMN_ERROR + pinned + " has " + nulls + " null(s) in the file";
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Readers bind an id-carrying file to table columns by embedded id, names ignored, so a file
+     * registers only when its ids agree with the table exactly: every file column the table has by
+     * name must carry that column's id, and every embedded id the table knows must name the same
+     * column. Anything else would collect stats for, and read back, the wrong columns, silently.
+     * File columns the table does not know at all are permitted; they are invisible to readers,
+     * like uncovered columns in id-less files.
+     */
+    static @Nullable String embeddedIdMismatch(
+        MessageType fileType, org.apache.iceberg.Schema tableSchema) {
+      if (!ParquetSchemaUtil.hasIds(fileType)) {
+        return null;
+      }
+      org.apache.iceberg.Schema fileSchema;
+      try {
+        fileSchema = ParquetSchemaUtil.convert(fileType);
+      } catch (RuntimeException e) {
+        // unconvertible schemas are reported by the coverage check with their own message
+        return null;
+      }
+      for (Map.Entry<Integer, String> entry :
+          TypeUtil.indexNameById(fileSchema.asStruct()).entrySet()) {
+        int fileId = entry.getKey();
+        String path = entry.getValue();
+        org.apache.iceberg.types.Types.@Nullable NestedField tableField =
+            tableSchema.findField(path);
+        if (tableField != null && tableField.fieldId() != fileId) {
+          return EMBEDDED_ID_ERROR
+              + "column '"
+              + path
+              + "' has field id "
+              + fileId
+              + " in the file but "
+              + tableField.fieldId()
+              + " in the table"
+              + MIGRATE_HINT;
+        }
+        @Nullable String tableName = tableSchema.findColumnName(fileId);
+        if (tableName != null && !tableName.equals(path)) {
+          return EMBEDDED_ID_ERROR
+              + "field id "
+              + fileId
+              + " names '"
+              + path
+              + "' in the file but '"
+              + tableName
+              + "' in the table"
+              + MIGRATE_HINT;
         }
       }
       return null;

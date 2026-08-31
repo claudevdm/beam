@@ -1083,10 +1083,7 @@ public class AddFilesTest {
             .operations()
             .current()
             .metadataFileLocation();
-    String covered = root + "covered.parquet";
-    DataWriter<Record> writer = createWriter(covered);
-    writer.write(record(1, "a", 1));
-    writer.close();
+    String covered = writeWithSchema("covered.parquet", icebergSchema, record(1, "a", 1));
     String wide = writeWithSchema("wide.parquet", WIDER, widerRecord(WIDER));
     Schema conflicting =
         new Schema(
@@ -1253,10 +1250,7 @@ public class AddFilesTest {
 
   @Test
   public void testMissingTableIsCreatedFromTheFilesUnion() throws Exception {
-    String narrow = root + "narrow.parquet";
-    DataWriter<Record> writer = createWriter(narrow);
-    writer.write(record(1, "a", 1));
-    writer.close();
+    String narrow = writeWithSchema("narrow.parquet", icebergSchema, record(1, "a", 1));
     String wide = writeWithSchema("wide.parquet", WIDER, widerRecord(WIDER));
 
     PCollectionRowTuple output =
@@ -1439,6 +1433,12 @@ public class AddFilesTest {
   }
 
   private String writeWithSchema(String name, Schema schema, Record... records) throws IOException {
+    return IdLessParquet.write(root + name, schema, records);
+  }
+
+  /** The Iceberg writer embeds the schema's field ids; only id-guard tests want that. */
+  private String writeWithEmbeddedIds(String name, Schema schema, Record... records)
+      throws IOException {
     String file = root + name;
     DataWriter<Record> writer =
         Parquet.writeData(Files.localOutput(file))
@@ -1710,5 +1710,91 @@ public class AddFilesTest {
     PAssert.thatSingleton(out.get(AddFiles.ConvertToDataFile.DATA_FILES).apply(Count.globally()))
         .isEqualTo(1L);
     pipeline.run().waitUntilFinish();
+  }
+
+  // ---- embedded Iceberg field ids
+
+  @Test
+  public void testEmbeddedIdFileWithMatchingIdsRegisters() throws Exception {
+    Table table = catalog.createTable(tableId, icebergSchema);
+    String file = writeWithEmbeddedIds("matching_ids.parquet", table.schema(), record(1, "a", 10));
+    PCollectionTuple out = convert(SchemaEvolutionConfig.disabled(), file);
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.ERRORS)).empty();
+    PAssert.thatSingleton(out.get(AddFiles.ConvertToDataFile.DATA_FILES).apply(Count.globally()))
+        .isEqualTo(1L);
+    pipeline.run().waitUntilFinish();
+  }
+
+  @Test
+  public void testEmbeddedIdFileWithShiftedIdsIsRejected() throws Exception {
+    catalog.createTable(tableId, icebergSchema);
+    Schema shifted =
+        new Schema(
+            Types.NestedField.required(4, "id", Types.IntegerType.get()),
+            Types.NestedField.required(5, "name", Types.StringType.get()),
+            Types.NestedField.required(6, "age", Types.IntegerType.get()));
+    String file = writeWithEmbeddedIds("shifted_ids.parquet", shifted, record(1, "a", 10));
+    PCollectionTuple out = convert(SchemaEvolutionConfig.disabled(), file);
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.DATA_FILES)).empty();
+    PAssert.thatSingleton(out.get(AddFiles.ConvertToDataFile.ERRORS))
+        .satisfies(
+            row -> {
+              String error = checkStateNotNull(row.getString("error"));
+              assertTrue(error, error.startsWith(AddFiles.ConvertToDataFile.EMBEDDED_ID_ERROR));
+              assertTrue(error, error.contains("field id"));
+              return null;
+            });
+    pipeline.run().waitUntilFinish();
+  }
+
+  @Test
+  public void testEmbeddedIdFileWithSwappedNamesIsRejected() throws Exception {
+    catalog.createTable(tableId, icebergSchema);
+    // same ids, two names exchanged: id-based reads would return the wrong columns
+    Schema swapped =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.required(2, "age", Types.IntegerType.get()),
+            Types.NestedField.required(3, "name", Types.StringType.get()));
+    Record record = GenericRecord.create(swapped).copy("id", 1, "age", 10, "name", "a");
+    String file = writeWithEmbeddedIds("swapped_names.parquet", swapped, record);
+    PCollectionTuple out = convert(SchemaEvolutionConfig.disabled(), file);
+    PAssert.that(out.get(AddFiles.ConvertToDataFile.DATA_FILES)).empty();
+    PAssert.thatSingleton(out.get(AddFiles.ConvertToDataFile.ERRORS))
+        .satisfies(
+            row -> {
+              String error = checkStateNotNull(row.getString("error"));
+              assertTrue(error, error.startsWith(AddFiles.ConvertToDataFile.EMBEDDED_ID_ERROR));
+              return null;
+            });
+    pipeline.run().waitUntilFinish();
+  }
+
+  @Test
+  public void testEmbeddedIdFileDoesNotDriveEvolution() throws Exception {
+    catalog.createTable(tableId, icebergSchema);
+    Schema withScore =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.required(2, "name", Types.StringType.get()),
+            Types.NestedField.required(3, "age", Types.IntegerType.get()),
+            Types.NestedField.optional(4, "score", Types.LongType.get()));
+    Record record = GenericRecord.create(withScore).copy("id", 1, "name", "a", "age", 10);
+    record.setField("score", 5L);
+    String file = writeWithEmbeddedIds("id_evolution.parquet", withScore, record);
+    PCollectionRowTuple out =
+        pipeline
+            .apply(Create.of(Arrays.asList(file)))
+            .apply(addFiles(SchemaEvolutionConfig.of(SchemaEvolutionOption.ALLOW_FIELD_ADDITION)));
+    PAssert.thatSingleton(out.get(AddFiles.ERROR_TAG))
+        .satisfies(
+            row -> {
+              String error = checkStateNotNull(row.getString("error"));
+              assertTrue(error, error.startsWith(AddFiles.ConvertToDataFile.UNCOVERED_ERROR));
+              return null;
+            });
+    pipeline.run().waitUntilFinish();
+    Table table = catalog.loadTable(tableId);
+    assertNull("id file must not add columns", table.schema().findField("score"));
   }
 }
